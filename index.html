@@ -1,0 +1,1738 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LagerPilot — Lagerverwaltung</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;height:100%}
+#root{height:100%}
+::placeholder{color:#9ca3af}
+button{font-family:inherit;cursor:pointer}
+input,select,textarea{font-family:inherit}
+.lp-scroll::-webkit-scrollbar{width:10px;height:10px}
+.lp-scroll::-webkit-scrollbar-thumb{background:#d1d5db;border-radius:6px;border:2px solid #fff}
+@keyframes lpfade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes lptoast{0%{opacity:0;transform:translateY(12px)}12%{opacity:1;transform:translateY(0)}88%{opacity:1;transform:translateY(0)}100%{opacity:0;transform:translateY(12px)}}
+@media print{ .lp-noprint{display:none!important} body *{visibility:hidden} .lp-print-area,.lp-print-area *{visibility:visible} .lp-print-area{position:fixed!important;left:50%!important;top:40px!important;transform:translateX(-50%)!important;border:none!important;box-shadow:none!important} }
+/* Responsives Layout: Grids zusammenklappen, Sidebar einklappbar */
+.lp-hamburger{display:none}
+.lp-backdrop{display:none}
+@media (max-width:1100px){
+  .lp-grid-4{grid-template-columns:repeat(2,1fr)!important}
+  .lp-grid-3{grid-template-columns:repeat(2,1fr)!important}
+  .lp-grid-dash{grid-template-columns:1fr!important}
+  .lp-grid-side{grid-template-columns:1fr!important}
+  .lp-grid-2{grid-template-columns:1fr!important}
+}
+@media (max-width:760px){
+  .lp-grid-4{grid-template-columns:1fr!important}
+  .lp-grid-3{grid-template-columns:1fr!important}
+  .lp-sidebar{position:fixed!important;left:0;top:0;bottom:0;z-index:50;transform:translateX(-100%);transition:transform .22s ease}
+  .lp-sidebar.lp-open{transform:translateX(0)}
+  .lp-backdrop.lp-open{display:block;position:fixed;inset:0;background:rgba(15,23,42,.4);z-index:45}
+  .lp-hamburger{display:flex!important}
+  .lp-search-btn{display:none!important}
+  .lp-main-pad{padding:16px!important}
+}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script>
+  // Pin the JSX transform to the classic runtime (React.createElement) so it
+  // works against the global React UMD build regardless of Babel's version
+  // default (Babel 8 defaults to the automatic runtime, which emits imports).
+  Babel.registerPreset('react-classic', {
+    presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]],
+  });
+</script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react-classic">
+const { useState } = React;
+
+// Parse a CSS declaration string into a React style object, so the design's
+// inline styles can be reproduced verbatim.
+function css(str){
+  const o = {};
+  if(!str) return o;
+  String(str).split(';').forEach(decl => {
+    const i = decl.indexOf(':');
+    if(i < 0) return;
+    let k = decl.slice(0, i).trim();
+    const v = decl.slice(i + 1).trim();
+    if(!k) return;
+    k = k.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    o[k] = v;
+  });
+  return o;
+}
+
+// Hoverable / focusable element wrapper — reproduces the design's
+// style-hover / style-focus pseudo-states. Forwards a DOM ref via innerRef.
+class Hx extends React.Component {
+  constructor(p){ super(p); this.state = { h:false, f:false }; }
+  render(){
+    const { tag='div', css:c, hover, focus, innerRef, children,
+            onMouseEnter, onMouseLeave, onFocus, onBlur, ...rest } = this.props;
+    const style = {
+      ...css(c),
+      ...(this.state.h && hover ? css(hover) : null),
+      ...(this.state.f && focus ? css(focus) : null),
+    };
+    return React.createElement(tag, {
+      ...rest,
+      ref: innerRef,
+      style,
+      onMouseEnter:(e)=>{ this.setState({h:true}); onMouseEnter && onMouseEnter(e); },
+      onMouseLeave:(e)=>{ this.setState({h:false}); onMouseLeave && onMouseLeave(e); },
+      onFocus:(e)=>{ this.setState({f:true}); onFocus && onFocus(e); },
+      onBlur:(e)=>{ this.setState({f:false}); onBlur && onBlur(e); },
+    }, children);
+  }
+}
+
+class App extends React.Component {
+  // Default-Mitarbeiter (werden in localStorage gespiegelt, sobald verändert).
+  // admin=true → darf die Benutzerverwaltung „Personal" öffnen.
+  defaultUsers = [
+    { id: 'u1', name: 'Thomas Berg', role: 'Lagerleiter', initials: 'TB', hue: 220, password: '1234', admin: true },
+    { id: 'u2', name: 'Sandra Klein', role: 'Montage', initials: 'SK', hue: 330, password: '1234', admin: false },
+    { id: 'u3', name: 'Markus Vogel', role: 'Fertigung', initials: 'MV', hue: 150, password: '1234', admin: false },
+    { id: 'u4', name: 'Ali Demir', role: 'Instandhaltung', initials: 'AD', hue: 35, password: '1234', admin: false },
+    { id: 'u5', name: 'Petra Sauer', role: 'Einkauf', initials: 'PS', hue: 270, password: '1234', admin: true },
+  ];
+  roleOptions = ['Lagerleiter','Montage','Fertigung','Instandhaltung','Einkauf','Qualität','Sonstige'];
+
+  loadUsers() {
+    try { const r = localStorage.getItem('lp_users'); if (r) { const a = JSON.parse(r); if (Array.isArray(a) && a.length) return a; } } catch(e) {}
+    return this.defaultUsers.map(u => ({ ...u }));
+  }
+  saveUsers(users) { try { localStorage.setItem('lp_users', JSON.stringify(users)); } catch(e) {} }
+  initialsOf(name) {
+    const parts = (name||'').trim().split(/\s+/).filter(Boolean);
+    const a = (parts[0]||'')[0]||''; const b = (parts[1]||'')[0]||'';
+    return ((a+b) || (name||'').trim().slice(0,2)).toUpperCase();
+  }
+
+  // Generische Persistenz (localStorage). Datums-Felder werden beim Laden
+  // wieder zu Date-Objekten gemacht.
+  loadJSON(key, fallback) {
+    try { const r = localStorage.getItem(key); if (r) { const v = JSON.parse(r); if (v != null) return v; } } catch(e) {}
+    return fallback;
+  }
+  saveJSON(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) {} }
+  loadParts() { const a = this.loadJSON('lp_parts', null); return Array.isArray(a) ? a : this.parts; }
+  loadTransactions() { const a = this.loadJSON('lp_tx', null); return Array.isArray(a) ? a.map(t => ({ ...t, ts:new Date(t.ts) })) : this.transactions; }
+  loadSentOrders() { const a = this.loadJSON('lp_orders', null); return Array.isArray(a) ? a.map(o => ({ ...o, ts:new Date(o.ts) })) : []; }
+
+  parts = [
+    { id:'p1', nummer:'LAG-6205-2RS', bezeichnung:'Rillenkugellager 6205-2RS', lagerplatz:'A-01-02', bestand:48, mindestbestand:20, einheit:'Stk', kategorie:'Lager' },
+    { id:'p2', nummer:'SHR-M8X40-933', bezeichnung:'Sechskantschraube M8×40 DIN 933', lagerplatz:'B-03-01', bestand:850, mindestbestand:200, einheit:'Stk', kategorie:'Verbindungselemente' },
+    { id:'p3', nummer:'ORG-25X3-NBR', bezeichnung:'O-Ring 25×3 NBR 70', lagerplatz:'C-02-04', bestand:12, mindestbestand:50, einheit:'Stk', kategorie:'Dichtungen' },
+    { id:'p4', nummer:'ZHR-M2-Z40', bezeichnung:'Stirnzahnrad Modul 2, Z40', lagerplatz:'D-01-01', bestand:6, mindestbestand:8, einheit:'Stk', kategorie:'Antrieb' },
+    { id:'p5', nummer:'WDR-30X52X7', bezeichnung:'Wellendichtring 30×52×7 BASL', lagerplatz:'C-05-02', bestand:34, mindestbestand:15, einheit:'Stk', kategorie:'Dichtungen' },
+    { id:'p6', nummer:'PFD-A8X7X40', bezeichnung:'Passfeder A 8×7×40 DIN 6885', lagerplatz:'B-07-03', bestand:120, mindestbestand:60, einheit:'Stk', kategorie:'Antrieb' },
+    { id:'p7', nummer:'ZST-6X30-M6', bezeichnung:'Zylinderstift 6 m6×30 DIN 6325', lagerplatz:'B-09-02', bestand:0, mindestbestand:40, einheit:'Stk', kategorie:'Verbindungselemente' },
+    { id:'p8', nummer:'SPS-M8-6796', bezeichnung:'Spannscheibe M8 DIN 6796', lagerplatz:'B-04-01', bestand:540, mindestbestand:150, einheit:'Stk', kategorie:'Verbindungselemente' },
+    { id:'p9', nummer:'LFS-20-HRC', bezeichnung:'Linearführung Schiene 20 mm', lagerplatz:'E-02-01', bestand:9, mindestbestand:4, einheit:'Stk', kategorie:'Lineartechnik' },
+    { id:'p10', nummer:'KLK-19-24', bezeichnung:'Klauenkupplung 19/24 ROTEX', lagerplatz:'D-04-02', bestand:5, mindestbestand:6, einheit:'Stk', kategorie:'Antrieb' },
+    { id:'p11', nummer:'PNZ-32-ISO', bezeichnung:'Pneumatikzylinder ISO 15552 Ø32', lagerplatz:'F-01-03', bestand:7, mindestbestand:3, einheit:'Stk', kategorie:'Pneumatik' },
+    { id:'p12', nummer:'FET-MOS2-400', bezeichnung:'Schmierfett MoS₂ 400 g Kartusche', lagerplatz:'G-01-01', bestand:22, mindestbestand:10, einheit:'Stk', kategorie:'Betriebsstoffe' },
+    { id:'p13', nummer:'SIR-471-25', bezeichnung:'Sicherungsring 25 DIN 471', lagerplatz:'B-11-04', bestand:310, mindestbestand:100, einheit:'Stk', kategorie:'Verbindungselemente' },
+    { id:'p14', nummer:'GWS-M6X10-913', bezeichnung:'Gewindestift M6×10 DIN 913', lagerplatz:'B-12-02', bestand:18, mindestbestand:80, einheit:'Stk', kategorie:'Verbindungselemente' },
+    { id:'p15', nummer:'RSC-SPZ-100', bezeichnung:'Riemenscheibe SPZ 100-1', lagerplatz:'D-07-01', bestand:14, mindestbestand:6, einheit:'Stk', kategorie:'Antrieb' },
+    { id:'p16', nummer:'KGL-NA4905', bezeichnung:'Nadellager NA 4905', lagerplatz:'A-02-03', bestand:3, mindestbestand:12, einheit:'Stk', kategorie:'Lager' },
+    // --- Baugruppe „Kopf vorn" (Zeichnung 50.2507.203, FORMING AG) ---
+    { id:'p17', nummer:'50.2507.007', bezeichnung:'Joch Hinten', lagerplatz:'H-01-01', bestand:7, mindestbestand:3, einheit:'Stk', kategorie:'Kopf vorn' },
+    { id:'p18', nummer:'50.2507.017', bezeichnung:'Deckel', lagerplatz:'H-01-02', bestand:4, mindestbestand:3, einheit:'Stk', kategorie:'Kopf vorn' },
+    { id:'p19', nummer:'50.2507.018', bezeichnung:'Schneckenrad Sonderbohrung', lagerplatz:'H-02-01', bestand:3, mindestbestand:2, einheit:'Stk', kategorie:'Kopf vorn' },
+    { id:'p20', nummer:'50.2507.021', bezeichnung:'Verstellspindel Oben', lagerplatz:'H-02-02', bestand:9, mindestbestand:2, einheit:'Stk', kategorie:'Kopf vorn' },
+    { id:'p21', nummer:'50.2507.032', bezeichnung:'Schutzhülse', lagerplatz:'H-03-01', bestand:12, mindestbestand:3, einheit:'Stk', kategorie:'Kopf vorn' },
+    { id:'p22', nummer:'81108', bezeichnung:'TV Axiallager INA 81108', lagerplatz:'A-03-01', bestand:6, mindestbestand:4, einheit:'Stk', kategorie:'Lager' },
+    { id:'p23', nummer:'DIN71412-AM6', bezeichnung:'Kegelschmiernippel Form A, DIN 71412 AM6', lagerplatz:'G-02-01', bestand:25, mindestbestand:10, einheit:'Stk', kategorie:'Betriebsstoffe' },
+    { id:'p24', nummer:'M6X20-912', bezeichnung:'Zylinderschraube M6×20 DIN 912', lagerplatz:'B-05-01', bestand:40, mindestbestand:60, einheit:'Stk', kategorie:'Verbindungselemente' },
+    { id:'p25', nummer:'M6X25-912', bezeichnung:'Zylinderschraube M6×25 DIN 912', lagerplatz:'B-05-02', bestand:18, mindestbestand:40, einheit:'Stk', kategorie:'Verbindungselemente' },
+    { id:'p26', nummer:'PF-12X8X80', bezeichnung:'Passfeder 12×8×80 DIN 6885A', lagerplatz:'B-08-01', bestand:14, mindestbestand:20, einheit:'Stk', kategorie:'Antrieb' },
+    { id:'p27', nummer:'50.2507.Z15', bezeichnung:'Antrieb Zentralverstellung Vorne', lagerplatz:'H-04-01', bestand:2, mindestbestand:2, einheit:'Stk', kategorie:'Kopf vorn' },
+    { id:'p28', nummer:'RSM16-1500', bezeichnung:'Ringschraube drehbar M16, RSM16 1500', lagerplatz:'B-06-01', bestand:5, mindestbestand:6, einheit:'Stk', kategorie:'Verbindungselemente' },
+  ];
+
+  drawings = [
+    { id:'d1', nummer:'ZNG-1001-A', bezeichnung:'Getriebegehäuse-Baugruppe', bom:[ {nummer:'LAG-6205-2RS',menge:2},{nummer:'WDR-30X52X7',menge:2},{nummer:'SIR-471-25',menge:4},{nummer:'SHR-M8X40-933',menge:8},{nummer:'FET-MOS2-400',menge:1} ] },
+    { id:'d2', nummer:'ZNG-2003-B', bezeichnung:'Antriebseinheit kompakt', bom:[ {nummer:'ZHR-M2-Z40',menge:1},{nummer:'PFD-A8X7X40',menge:2},{nummer:'KLK-19-24',menge:1},{nummer:'RSC-SPZ-100',menge:1},{nummer:'LAG-6205-2RS',menge:2} ] },
+    { id:'d3', nummer:'ZNG-3007-C', bezeichnung:'Pneumatik-Steuermodul', bom:[ {nummer:'PNZ-32-ISO',menge:1},{nummer:'ORG-25X3-NBR',menge:4},{nummer:'GWS-M6X10-913',menge:6},{nummer:'SHR-M8X40-933',menge:4} ] },
+    { id:'d4', nummer:'ZNG-4012-D', bezeichnung:'Linearachse 500 mm', bom:[ {nummer:'LFS-20-HRC',menge:2},{nummer:'LAG-6205-2RS',menge:4},{nummer:'ZST-6X30-M6',menge:8},{nummer:'SPS-M8-6796',menge:8} ] },
+    { id:'d5', nummer:'50.2507.203', bezeichnung:'Kopf vorn (FORMING AG)', bom:[
+      {nummer:'50.2507.007',menge:1},{nummer:'50.2507.017',menge:1},{nummer:'50.2507.018',menge:1},{nummer:'50.2507.021',menge:1},
+      {nummer:'50.2507.032',menge:1},{nummer:'81108',menge:1},{nummer:'DIN71412-AM6',menge:1},{nummer:'M6X20-912',menge:6},
+      {nummer:'M6X25-912',menge:4},{nummer:'PF-12X8X80',menge:2},{nummer:'50.2507.Z15',menge:1},{nummer:'RSM16-1500',menge:2} ] },
+  ];
+
+  transactions = (() => {
+    const now = Date.now(); const m = 60000;
+    const t = (mins, user, type, nummer, bez, menge, rest) => ({ id:'t'+mins, ts:new Date(now - mins*m), user, type, nummer, bezeichnung:bez, menge, rest });
+    return [
+      t(14,'Sandra Klein','Entnahme','LAG-6205-2RS','Rillenkugellager 6205-2RS',4,48),
+      t(38,'Markus Vogel','Entnahme','ORG-25X3-NBR','O-Ring 25×3 NBR 70',8,12),
+      t(95,'Ali Demir','Einlagerung','FET-MOS2-400','Schmierfett MoS₂ 400 g Kartusche',12,22),
+      t(140,'Sandra Klein','Entnahme','SHR-M8X40-933','Sechskantschraube M8×40 DIN 933',50,850),
+      t(210,'Markus Vogel','Entnahme','ZHR-M2-Z40','Stirnzahnrad Modul 2, Z40',2,6),
+      t(265,'Thomas Berg','Einlagerung','PFD-A8X7X40','Passfeder A 8×7×40 DIN 6885',40,120),
+      t(330,'Ali Demir','Entnahme','ZST-6X30-M6','Zylinderstift 6 m6×30 DIN 6325',40,0),
+      t(1280,'Sandra Klein','Entnahme','KLK-19-24','Klauenkupplung 19/24 ROTEX',1,5),
+      t(1395,'Markus Vogel','Entnahme','GWS-M6X10-913','Gewindestift M6×10 DIN 913',24,18),
+      t(1500,'Thomas Berg','Einlagerung','SIR-471-25','Sicherungsring 25 DIN 471',100,310),
+      t(2840,'Petra Sauer','Einlagerung','LFS-20-HRC','Linearführung Schiene 20 mm',6,9),
+      t(2910,'Ali Demir','Entnahme','KGL-NA4905','Nadellager NA 4905',5,3),
+    ];
+  })();
+
+  constructor(props){
+    super(props);
+    this.state = {
+      screen: 'login', loginUser: null, pin: '', user: null,
+      users: this.loadUsers(), authError: '',
+      loginMode: 'login', reg: { name:'', role:'Montage', pass:'', pass2:'' }, regError: '',
+      pwModal: false, pwCur:'', pwNew:'', pwNew2:'', pwError:'',
+      userEditing: false, userDraft: null, userError: '',
+      navOpen: false,
+      view: 'dashboard', search: '', selectedPartId: null,
+      editing: false, editDraft: null, creating: false, editCatNew: false,
+      scanCode: '', scanError: '', bookPart: null, bookType: 'entnahme', bookQty: 1, bookDone: null,
+      parts: this.loadParts(), transactions: this.loadTransactions(), nextTx: 1000,
+      toast: '', filterCat: 'Alle', sortKey: 'bezeichnung',
+      drawingQuery: '', drawingId: null, drawingError: '',
+      binQuery: '', binCode: null, binError: '', binMode: 'scan', binSearch: '',
+      reorderSel: {}, reorderQty: {}, reorderInit: false,
+      recipients: [ {id:'r1',name:'Petra Sauer',email:'p.sauer@forming.example',role:'Einkauf',sel:true},
+        {id:'r2',name:'Thomas Berg',email:'t.berg@forming.example',role:'Lagerleiter',sel:false},
+        {id:'r3',name:'Einkauf Sammel',email:'einkauf@forming.example',role:'Verteiler',sel:false} ],
+      customEmail:'', emailNote:'', aiBusy:false, aiDone:false, aiReasons:[], sentOrders:this.loadSentOrders(), orderTab:'vorschlag',
+    };
+  }
+
+  scanRef = React.createRef();
+  qtyRef = React.createRef();
+  binScanRef = React.createRef();
+  drawingScanRef = React.createRef();
+
+  zoneNames = { A:'Halle 1 · Lager Nord', B:'Halle 1 · Lager Nord', C:'Halle 2 · Dichtungen', D:'Halle 2 · Antriebstechnik', E:'Halle 3 · Lineartechnik', F:'Halle 3 · Pneumatik', G:'Nebenraum · Betriebsstoffe', H:'Halle 1 · Baugruppe Kopf vorn' };
+
+  // ---- helpers ----
+  get accent() { return this.props.accentColor || '#2563eb'; }
+  get accentDark() { return '#1d4ed8'; }
+
+  statusOf(p) {
+    if (p.bestand <= 0) return { key:'leer', label:'Nicht auf Lager', color:'#dc2626', bg:'#fef2f2' };
+    if (p.bestand < p.mindestbestand) return { key:'kritisch', label:'Kritisch', color:'#dc2626', bg:'#fef2f2' };
+    if (p.bestand < p.mindestbestand * 1.3) return { key:'bald', label:'Bald bestellen', color:'#b45309', bg:'#fffbeb' };
+    return { key:'ok', label:'OK', color:'#15803d', bg:'#f0fdf4' };
+  }
+  userByName(n) { return this.state.users.find(u => u.name === n); }
+  fmtTime(d) {
+    const pad = x => String(x).padStart(2,'0');
+    return pad(d.getDate())+'.'+pad(d.getMonth()+1)+'.'+d.getFullYear()+' '+pad(d.getHours())+':'+pad(d.getMinutes());
+  }
+  relTime(d) {
+    const diff = (Date.now() - d.getTime())/60000;
+    if (diff < 1) return 'gerade eben';
+    if (diff < 60) return Math.round(diff)+' Min.';
+    if (diff < 1440) return Math.round(diff/60)+' Std.';
+    return Math.round(diff/1440)+' Tg.';
+  }
+  isToday(d) { const n=new Date(); return d.getDate()===n.getDate()&&d.getMonth()===n.getMonth()&&d.getFullYear()===n.getFullYear(); }
+
+  flash(msg) { this.setState({ toast: msg }); clearTimeout(this._tt); this._tt = setTimeout(()=>this.setState({toast:''}), 2600); }
+
+  // ---- actions ----
+  go = (v) => this.setState({ view: v, selectedPartId: v==='detail'?this.state.selectedPartId:null, editing:false, creating:false, navOpen:false });
+  toggleNav = () => this.setState(s => ({ navOpen: !s.navOpen }));
+  closeNav = () => this.setState({ navOpen:false });
+  openPart = (id) => this.setState({ view:'detail', selectedPartId:id, editing:false, creating:false });
+
+  doScan = () => {
+    const code = (this.state.scanCode||'').trim().toLowerCase();
+    if (!code) return;
+    // Erst exakter Teilenummer-Treffer, dann Teil-Übereinstimmungen — sonst
+    // würde eine Teileingabe das falsche Teil greifen.
+    const p = this.state.parts.find(x => x.nummer.toLowerCase()===code)
+           || this.state.parts.find(x => x.nummer.toLowerCase().includes(code))
+           || this.state.parts.find(x => x.bezeichnung.toLowerCase().includes(code));
+    if (p) { this.setState({ bookPart:p, bookQty:1, bookType:'entnahme', scanError:'', scanCode:'', bookDone:null }, ()=>{ if(this.qtyRef.current) this.qtyRef.current.focus(); }); }
+    else { this.setState({ scanError:'Kein Teil zu „'+this.state.scanCode+'" gefunden', scanCode:'' }, ()=>{ if(this.scanRef.current) this.scanRef.current.focus(); }); }
+  };
+  onScanKey = (e) => { if (e.key==='Enter') this.doScan(); };
+
+  setBookType = (t) => this.setState({ bookType:t });
+  bumpQty = (d) => this.setState(s => ({ bookQty: Math.max(1, (s.bookQty||1)+d) }));
+
+  confirmBooking = () => {
+    const { bookPart, bookType, user } = this.state;
+    if (!bookPart) return;
+    // Über-Entnahme verhindern: bei Entnahme die Menge auf den vorhandenen
+    // Bestand begrenzen, damit nie mehr gebucht wird als wirklich da ist.
+    const reqQty = Math.max(1, this.state.bookQty||1);
+    const isEntnahme = bookType==='entnahme';
+    const qty = isEntnahme ? Math.min(reqQty, bookPart.bestand) : reqQty;
+    if (isEntnahme && qty <= 0) { this.flash('Kein Bestand für eine Entnahme vorhanden'); return; }
+    const newBestand = isEntnahme ? bookPart.bestand - qty : bookPart.bestand + qty;
+    const parts = this.state.parts.map(p => p.id===bookPart.id ? {...p, bestand:newBestand} : p);
+    const tx = { id:'t'+Date.now(), ts:new Date(), user:user.name, type: isEntnahme?'Entnahme':'Einlagerung', nummer:bookPart.nummer, bezeichnung:bookPart.bezeichnung, menge:qty, rest:newBestand };
+    this.setState({ parts, transactions:[tx, ...this.state.transactions],
+      bookDone:{ type:tx.type, menge:qty, einheit:bookPart.einheit, bezeichnung:bookPart.bezeichnung, rest:newBestand, nummer:bookPart.nummer }, bookPart:null });
+    this.flash(tx.type+' gebucht: '+qty+'× '+bookPart.bezeichnung);
+  };
+  newBooking = () => this.setState({ bookDone:null, bookPart:null, scanError:'' }, ()=>{ if(this.scanRef.current) this.scanRef.current.focus(); });
+  cancelBook = () => this.setState({ bookPart:null, scanError:'' }, ()=>{ if(this.scanRef.current) this.scanRef.current.focus(); });
+
+  // --- Nachbestellen ---
+  recommendQty(p) { const target = Math.max(p.mindestbestand*2, p.mindestbestand+1); return Math.max(0, target - p.bestand); }
+  verbrauch(nummer) { return this.state.transactions.filter(t=>t.nummer===nummer && t.type==='Entnahme').reduce((a,t)=>a+t.menge,0); }
+  ensureReorderInit = () => {
+    if (this.state.reorderInit) return;
+    const need = this.state.parts.filter(p => p.bestand < p.mindestbestand*1.3);
+    const sel={}, qty={};
+    need.forEach(p => { sel[p.id]=true; qty[p.id]=this.recommendQty(p); });
+    this.setState({ reorderSel:sel, reorderQty:qty, reorderInit:true });
+  };
+  toggleReorder = (id) => this.setState(s => ({ reorderSel:{...s.reorderSel, [id]: !(s.reorderSel[id]!==false)} }));
+  setReorderQty = (id) => (e) => { const v=parseInt(e.target.value,10); this.setState(s=>({ reorderQty:{...s.reorderQty,[id]:isNaN(v)?0:Math.max(0,v)} })); };
+  toggleRecipient = (id) => this.setState(s => ({ recipients:s.recipients.map(r=>r.id===id?{...r,sel:!r.sel}:r) }));
+  setOrderTab = (t) => this.setState({ orderTab:t });
+
+  selectedOrderParts() {
+    return this.state.parts
+      .filter(p => p.bestand < p.mindestbestand*1.3)
+      .filter(p => this.state.reorderSel[p.id]!==false)
+      .map(p => ({ ...p, menge: this.state.reorderQty[p.id]!==undefined ? this.state.reorderQty[p.id] : this.recommendQty(p), verbrauch:this.verbrauch(p.nummer) }))
+      .filter(p => p.menge>0);
+  }
+
+  // Regelbasierter Bestellvorschlag (keine KI). Optimiert die Mengen aus
+  // Bestand + Mindestbestand und rundet Normteile auf praktische Gebinde.
+  runSuggestion = () => {
+    const items = this.selectedOrderParts();
+    if (!items.length) { this.flash('Bitte zuerst Teile auswählen'); return; }
+    const qty = {...this.state.reorderQty}; const reasons=[];
+    items.forEach(p => { let m = this.recommendQty(p);
+      const isNorm = /DIN|M\d|912|6885|6796|471|RSM/.test(p.nummer);
+      if (isNorm) m = Math.ceil(m/50)*50 || 50;
+      qty[p.id]=m;
+      const grund = p.bestand===0 ? 'leer — dringend auffüllen' : (p.verbrauch>p.mindestbestand ? 'hoher Verbrauch gesamt' : 'auf Sollbestand auffüllen');
+      reasons.push({ bezeichnung:p.bezeichnung, nummer:p.nummer, menge:m, grund });
+    });
+    this.setState({ reorderQty:qty, aiReasons:reasons, aiDone:true });
+    this.flash('Bestellvorschlag berechnet');
+  };
+
+  buildEmailBody() {
+    const items = this.selectedOrderParts();
+    const head = 'Bitte folgende Teile nachbestellen:\n\n';
+    const rows = items.map(p => `• ${p.menge} ${p.einheit}  ${p.bezeichnung}  (${p.nummer})  — aktueller Bestand ${p.bestand}, Mindestbestand ${p.mindestbestand}`).join('\n');
+    const note = this.state.emailNote.trim() ? `\n\nNotiz: ${this.state.emailNote.trim()}` : '';
+    return head + rows + note + `\n\nGesendet von ${this.state.user?this.state.user.name:''} · LagerPilot`;
+  }
+  // Echter Versand über das Mailprogramm des Nutzers (mailto:). Eine statische
+  // Seite kann selbst keine Mail verschicken — so wird „Senden" aber real.
+  sendEmail = () => {
+    const items = this.selectedOrderParts();
+    if (!items.length) { this.flash('Bitte zuerst Teile auswählen'); return; }
+    const recs = this.state.recipients.filter(r=>r.sel).map(r=>r.email);
+    if (this.state.customEmail.trim()) recs.push(this.state.customEmail.trim());
+    if (!recs.length) { this.flash('Bitte mindestens einen Empfänger wählen'); return; }
+    const subject = 'Nachbestellung Lager — '+items.length+' Positionen';
+    const href = 'mailto:'+encodeURIComponent(recs.join(','))+'?subject='+encodeURIComponent(subject)+'&body='+encodeURIComponent(this.buildEmailBody());
+    try { window.location.href = href; } catch(e) {}
+    const order = { id:'o'+Date.now(), ts:new Date(), method:'E-Mail', to:recs, count:items.length,
+      totalMenge:items.reduce((a,p)=>a+p.menge,0), parts:items.map(p=>({nummer:p.nummer,bezeichnung:p.bezeichnung,menge:p.menge,einheit:p.einheit})),
+      user:this.state.user?this.state.user.name:'' };
+    this.setState({ sentOrders:[order, ...this.state.sentOrders], orderTab:'gesendet' });
+    this.flash('E-Mail-Programm geöffnet — bitte dort senden');
+  };
+
+  // --- Lagerplätze ---
+  qrSvg(text, size) {
+    try {
+      const qr = qrcode(0, 'M'); qr.addData(text); qr.make();
+      const c = qr.getModuleCount(); const cell = size / c; let rects = '';
+      for (let r=0;r<c;r++) for (let col=0;col<c;col++) if (qr.isDark(r,col)) rects += `<rect x="${(col*cell).toFixed(2)}" y="${(r*cell).toFixed(2)}" width="${cell.toFixed(2)}" height="${cell.toFixed(2)}"/>`;
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect width="${size}" height="${size}" fill="#fff"/><g fill="#0f172a">${rects}</g></svg>`;
+      return 'data:image/svg+xml;utf8,'+encodeURIComponent(svg);
+    } catch(e) { return 'data:image/svg+xml;utf8,'+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}"><rect width="${size}" height="${size}" fill="#f3f4f6"/></svg>`); }
+  }
+  doBinScan = () => {
+    const code = (this.state.binQuery||'').trim().toUpperCase();
+    if (!code) return;
+    const norm = code.replace(/^LAGERPLATZ:/,'').trim();
+    const exists = this.state.parts.some(p => p.lagerplatz.toUpperCase()===norm);
+    if (exists) this.setState({ binCode:norm, binError:'', binQuery:'' });
+    else this.setState({ binError:'Kein Lagerplatz „'+this.state.binQuery+'" gefunden', binQuery:'' }, ()=>{ if(this.binScanRef.current) this.binScanRef.current.focus(); });
+  };
+  onBinKey = (e) => { if (e.key==='Enter') this.doBinScan(); };
+  clearBin = () => this.setState({ binCode:null, binError:'' }, ()=>{ if(this.binScanRef.current) this.binScanRef.current.focus(); });
+  setBinMode = (m) => this.setState({ binMode:m, binError:'' });
+  printBin = () => { setTimeout(()=>window.print(), 60); };
+
+  // --- Baubarkeit ---
+  doDrawingScan = () => {
+    const code = (this.state.drawingQuery||'').trim().toLowerCase();
+    if (!code) return;
+    const d = this.drawings.find(x => x.nummer.toLowerCase()===code)
+           || this.drawings.find(x => x.nummer.toLowerCase().includes(code))
+           || this.drawings.find(x => x.bezeichnung.toLowerCase().includes(code));
+    if (d) this.setState({ drawingId:d.id, drawingError:'', drawingQuery:'' });
+    else this.setState({ drawingError:'Keine Zeichnung zu „'+this.state.drawingQuery+'" gefunden', drawingQuery:'' }, ()=>{ if(this.drawingScanRef.current) this.drawingScanRef.current.focus(); });
+  };
+  onDrawingKey = (e) => { if (e.key==='Enter') this.doDrawingScan(); };
+  clearDrawing = () => this.setState({ drawingId:null, drawingError:'' }, ()=>{ if(this.drawingScanRef.current) this.drawingScanRef.current.focus(); });
+
+  // edit / create
+  existingCats() { return Array.from(new Set(this.state.parts.map(x => x.kategorie).filter(Boolean))); }
+  startEdit = () => { const p = this.state.parts.find(x=>x.id===this.state.selectedPartId); this.setState({ editing:true, editDraft:{...p}, editCatNew: !this.existingCats().includes(p.kategorie) }); };
+  startCreate = () => this.setState({ view:'detail', creating:true, editing:true, selectedPartId:null, editCatNew:false, editDraft:{ id:'new', nummer:'', bezeichnung:'', lagerplatz:'', bestand:0, mindestbestand:0, einheit:'Stk', kategorie: this.existingCats()[0] || 'Verbindungselemente' } });
+  editField = (k) => (e) => { let v = e.target.value; if(k==='bestand'||k==='mindestbestand') v = v===''?0:Math.max(0,parseInt(v,10)||0); this.setState({ editDraft:{...this.state.editDraft, [k]:v} }); };
+  editCatSelect = (e) => { const v = e.target.value;
+    if (v==='__new__') this.setState({ editCatNew:true, editDraft:{...this.state.editDraft, kategorie:''} });
+    else this.setState({ editCatNew:false, editDraft:{...this.state.editDraft, kategorie:v} });
+  };
+  cancelEdit = () => { if(this.state.creating) this.setState({ view:'teile', editing:false, creating:false, editDraft:null }); else this.setState({ editing:false, editDraft:null }); };
+  saveEdit = () => {
+    const d = this.state.editDraft;
+    if (!d.nummer.trim() || !d.bezeichnung.trim()) { this.flash('Teilenummer und Bezeichnung sind Pflicht'); return; }
+    // Teilenummer muss eindeutig sein — doppelte Nummern brechen sonst
+    // Buchung und Stücklisten-Auflösung (beide nehmen den ersten Treffer).
+    const num = d.nummer.trim().toLowerCase();
+    const dupe = this.state.parts.some(p => p.id!==d.id && p.nummer.trim().toLowerCase()===num);
+    if (dupe) { this.flash('Teilenummer „'+d.nummer.trim()+'" existiert bereits'); return; }
+    const clean = { ...d, nummer:d.nummer.trim(), bezeichnung:d.bezeichnung.trim(), kategorie:(d.kategorie||'').trim()||'Sonstige' };
+    if (this.state.creating) {
+      const id = 'p'+Date.now();
+      this.setState({ parts:[{...clean, id}, ...this.state.parts], view:'detail', selectedPartId:id, editing:false, creating:false, editDraft:null });
+      this.flash('Teil angelegt: '+clean.bezeichnung);
+    } else {
+      this.setState({ parts:this.state.parts.map(p=>p.id===d.id?{...clean}:p), editing:false, editDraft:null });
+      this.flash('Änderungen gespeichert');
+    }
+  };
+  deletePart = (id) => {
+    const p = this.state.parts.find(x=>x.id===id); if (!p) return;
+    if (typeof window!=='undefined' && window.confirm && !window.confirm('Teil „'+p.bezeichnung+'" wirklich löschen? Bestand und Verknüpfungen gehen verloren.')) return;
+    this.setState({ parts:this.state.parts.filter(x=>x.id!==id), view:'teile', selectedPartId:null, editing:false, creating:false, editDraft:null });
+    this.flash('Teil gelöscht: '+p.bezeichnung);
+  };
+
+  // --- Login / Registrierung ---
+  pickLoginUser = (id) => this.setState({ loginUser:id, authError:'' });
+  doLogin = () => {
+    const u = this.state.users.find(x => x.id === this.state.loginUser);
+    if (!u) { this.setState({ authError:'Bitte zuerst einen Mitarbeiter wählen' }); return; }
+    if ((this.state.pin||'') !== (u.password||'')) { this.setState({ authError:'Falsches Passwort für '+u.name }); return; }
+    this.setState({ screen:'app', user:u, view:'dashboard', pin:'', authError:'' });
+  };
+  setLoginMode = (m) => this.setState({ loginMode:m, authError:'', regError:'', reg:{ name:'', role:'Montage', pass:'', pass2:'' } });
+  regField = (k) => (e) => this.setState({ reg:{ ...this.state.reg, [k]:e.target.value } });
+  submitRegister = () => {
+    const r = this.state.reg;
+    if (!r.name.trim()) { this.setState({ regError:'Bitte Namen eingeben' }); return; }
+    if ((r.pass||'').length < 4) { this.setState({ regError:'Passwort muss mindestens 4 Zeichen haben' }); return; }
+    if (r.pass !== r.pass2) { this.setState({ regError:'Passwörter stimmen nicht überein' }); return; }
+    if (this.state.users.some(u => u.name.trim().toLowerCase() === r.name.trim().toLowerCase())) { this.setState({ regError:'Dieser Name existiert bereits' }); return; }
+    const u = { id:'u'+Date.now(), name:r.name.trim(), role:r.role||'Sonstige', initials:this.initialsOf(r.name), hue:Math.floor(Math.random()*360), password:r.pass, admin:false };
+    const users = [...this.state.users, u]; this.saveUsers(users);
+    this.setState({ users, loginMode:'login', loginUser:u.id, pin:'', regError:'', authError:'' });
+    this.flash('Konto erstellt — jetzt mit deinem Passwort anmelden');
+  };
+
+  // --- Passwort ändern (eigenes Konto) ---
+  openPwModal = () => this.setState({ pwModal:true, pwCur:'', pwNew:'', pwNew2:'', pwError:'' });
+  closePwModal = () => this.setState({ pwModal:false, pwError:'' });
+  submitPwChange = () => {
+    const { pwCur, pwNew, pwNew2, user } = this.state;
+    if (!user) return;
+    if (pwCur !== user.password) { this.setState({ pwError:'Aktuelles Passwort ist falsch' }); return; }
+    if ((pwNew||'').length < 4) { this.setState({ pwError:'Neues Passwort muss mindestens 4 Zeichen haben' }); return; }
+    if (pwNew !== pwNew2) { this.setState({ pwError:'Neue Passwörter stimmen nicht überein' }); return; }
+    const users = this.state.users.map(u => u.id===user.id ? { ...u, password:pwNew } : u);
+    this.saveUsers(users);
+    this.setState({ users, user:{ ...user, password:pwNew }, pwModal:false, pwError:'' });
+    this.flash('Passwort geändert');
+  };
+
+  // --- Benutzerverwaltung (Personal) ---
+  startUserCreate = () => this.setState({ userEditing:true, userError:'', userDraft:{ id:null, name:'', role:'Montage', password:'', admin:false } });
+  startUserEdit = (id) => { const u = this.state.users.find(x=>x.id===id); if(u) this.setState({ userEditing:true, userError:'', userDraft:{ id:u.id, name:u.name, role:u.role, password:'', admin:!!u.admin } }); };
+  cancelUser = () => this.setState({ userEditing:false, userDraft:null, userError:'' });
+  userField = (k) => (e) => { const v = k==='admin' ? e.target.checked : e.target.value; this.setState({ userDraft:{ ...this.state.userDraft, [k]:v } }); };
+  saveUser = () => {
+    const d = this.state.userDraft; if (!d) return;
+    if (!d.name.trim()) { this.setState({ userError:'Bitte Namen eingeben' }); return; }
+    const dupe = this.state.users.some(u => u.id!==d.id && u.name.trim().toLowerCase()===d.name.trim().toLowerCase());
+    if (dupe) { this.setState({ userError:'Dieser Name existiert bereits' }); return; }
+    if (!d.id && (d.password||'').length < 4) { this.setState({ userError:'Passwort muss mindestens 4 Zeichen haben' }); return; }
+    let users, updatedSelf = null;
+    if (d.id) {
+      users = this.state.users.map(u => {
+        if (u.id !== d.id) return u;
+        const merged = { ...u, name:d.name.trim(), role:d.role, admin:!!d.admin, initials:this.initialsOf(d.name) };
+        if ((d.password||'').length >= 4) merged.password = d.password;
+        if (this.state.user && this.state.user.id===u.id) updatedSelf = merged;
+        return merged;
+      });
+    } else {
+      const u = { id:'u'+Date.now(), name:d.name.trim(), role:d.role||'Sonstige', initials:this.initialsOf(d.name), hue:Math.floor(Math.random()*360), password:d.password, admin:!!d.admin };
+      users = [...this.state.users, u];
+    }
+    // Es muss immer mindestens ein Admin übrig bleiben (auch nach „Bearbeiten").
+    if (!users.some(u => u.admin)) { this.setState({ userError:'Mindestens ein Administrator muss bestehen bleiben' }); return; }
+    this.saveUsers(users);
+    // Hat sich der angemeldete Admin selbst die Rechte genommen, darf er die
+    // Personal-Seite nicht mehr sehen → zurück aufs Dashboard.
+    const lostOwnAdmin = updatedSelf && !updatedSelf.admin && this.state.view==='personal';
+    this.setState({ users, userEditing:false, userDraft:null, userError:'',
+      ...(updatedSelf?{user:updatedSelf}:{}), ...(lostOwnAdmin?{view:'dashboard'}:{}) });
+    this.flash(d.id ? 'Mitarbeiter aktualisiert: '+d.name.trim() : 'Mitarbeiter angelegt: '+d.name.trim());
+  };
+  deleteUser = (id) => {
+    if (this.state.user && this.state.user.id === id) { this.flash('Das eigene Konto kann nicht gelöscht werden'); return; }
+    const remaining = this.state.users.filter(u => u.id !== id);
+    if (!remaining.some(u => u.admin)) { this.flash('Mindestens ein Admin muss bestehen bleiben'); return; }
+    this.saveUsers(remaining);
+    this.setState({ users:remaining });
+    this.flash('Mitarbeiter gelöscht');
+  };
+
+  componentDidUpdate(_, prev) {
+    if (this.state.view==='buchen' && prev.view!=='buchen' && !this.state.bookPart && !this.state.bookDone) {
+      setTimeout(()=>{ if(this.scanRef.current) this.scanRef.current.focus(); }, 50);
+    }
+    if (this.state.view==='baubarkeit' && prev.view!=='baubarkeit' && !this.state.drawingId) {
+      setTimeout(()=>{ if(this.drawingScanRef.current) this.drawingScanRef.current.focus(); }, 50);
+    }
+    if (this.state.view==='bestellung' && prev.view!=='bestellung') this.ensureReorderInit();
+    // Persistenz: Bestände, Buchungen und ausgelöste Bestellungen spiegeln.
+    if (prev.parts !== this.state.parts) this.saveJSON('lp_parts', this.state.parts);
+    if (prev.transactions !== this.state.transactions) this.saveJSON('lp_tx', this.state.transactions);
+    if (prev.sentOrders !== this.state.sentOrders) this.saveJSON('lp_orders', this.state.sentOrders);
+  }
+
+  computeVals() {
+    const s = this.state, accent = this.accent;
+    const withStatus = p => { const st = this.statusOf(p); return { ...p, statusLabel:st.label, statusColor:st.color, statusBg:st.bg, statusKey:st.key, open:()=>this.openPart(p.id) }; };
+    const partsS = s.parts.map(withStatus);
+    const critical = partsS.filter(p => p.statusKey==='kritisch' || p.statusKey==='leer');
+    const reorder = partsS.filter(p => p.statusKey==='bald');
+    const todayTx = s.transactions.filter(t => this.isToday(t.ts));
+    const totalUnits = s.parts.reduce((a,p)=>a+p.bestand,0);
+
+    // nav
+    const mk = (key,label,badge) => ({ key,label, onClick:()=>this.go(key),
+      bg: s.view===key ? accent : 'transparent', fg: s.view===key ? '#fff':'#cbd5e1',
+      dot: s.view===key ? '#fff' : '#475569', weight: s.view===key ? '600':'500', badge: badge||null });
+    const navItems = [
+      mk('dashboard','Dashboard'),
+      mk('buchen','Buchen'),
+      mk('teile','Teile & Suche'),
+      mk('baubarkeit','Baubarkeit'),
+      mk('lagerplaetze','Lagerplätze'),
+      mk('warnungen','Warnungen', (critical.length)||null),
+      mk('bestellung','Nachbestellen'),
+      mk('historie','Historie'),
+    ];
+    if (s.user && s.user.admin) navItems.push(mk('personal','Personal'));
+
+    const titles = { dashboard:'Dashboard', buchen:'Buchen — Entnahme & Einlagerung', teile:'Teile & Suche', baubarkeit:'Baubarkeit — Zeichnung prüfen', lagerplaetze:'Lagerplätze — QR-Codes & Inhalt', bestellung:'Nachbestellen — Vorschlag & E-Mail', detail: s.creating?'Neues Teil anlegen':'Teil-Details', warnungen:'Warnungen', historie:'Transaktions-Historie', personal:'Personal — Benutzerverwaltung' };
+
+    const txView = t => { const u=this.userByName(t.user); const ein = t.type==='Einlagerung';
+      return { ...t, when:this.relTime(t.ts), whenFull:this.fmtTime(t.ts), sign: ein?'+':'–', tColor: ein?'#15803d':'#b45309', tBg: ein?'#f0fdf4':'#fffbeb',
+        deltaLabel:(ein?'+':'−')+t.menge, uInit:u?u.initials:'?', uHue:u?u.hue:220 }; };
+
+    // detail
+    const selPart = s.selectedPartId ? partsS.find(p=>p.id===s.selectedPartId) : null;
+    const selTx = selPart ? s.transactions.filter(t=>t.nummer===selPart.nummer).map(txView) : [];
+
+    // teile filtering
+    const q = s.search.trim().toLowerCase();
+    let listed = partsS.filter(p => !q || p.nummer.toLowerCase().includes(q) || p.bezeichnung.toLowerCase().includes(q) || p.lagerplatz.toLowerCase().includes(q));
+    if (s.filterCat!=='Alle') listed = listed.filter(p=>p.kategorie===s.filterCat);
+    listed = [...listed].sort((a,b)=> s.sortKey==='bestand' ? a.bestand-b.bestand : a[s.sortKey].localeCompare(b[s.sortKey]));
+    const cats = ['Alle', ...Array.from(new Set(s.parts.map(p=>p.kategorie)))];
+
+    // buildability
+    let drawingResult = null;
+    if (s.drawingId) {
+      const d = this.drawings.find(x => x.id===s.drawingId);
+      if (d) {
+        let lines = d.bom.map(b => { const part = s.parts.find(p=>p.nummer===b.nummer); const avail = part?part.bestand:0; const possible = Math.floor(avail / b.menge);
+          return { nummer:b.nummer, bezeichnung:part?part.bezeichnung:b.nummer, lagerplatz:part?part.lagerplatz:'—', mengePer:b.menge, avail, possible, einheit:part?part.einheit:'Stk', partId:part?part.id:null }; });
+        const buildable = lines.length ? Math.min(...lines.map(l=>l.possible)) : 0;
+        const maxP = Math.max(1, ...lines.map(l=>l.possible));
+        lines = lines.map(l => ({ ...l, limiting:l.possible===buildable, open: l.partId?()=>this.openPart(l.partId):()=>{},
+          barPct: Math.round(l.possible/maxP*100), rowBg: l.possible===buildable?'#fef2f2':'#fff', barColor: l.possible===buildable?'#dc2626':'#cbd5e1', possColor: l.possible===buildable?'#dc2626':'#374151' }));
+        const limitNames = lines.filter(l=>l.limiting).map(l=>l.bezeichnung);
+        drawingResult = { id:d.id, nummer:d.nummer, bezeichnung:d.bezeichnung, lines, buildable, partCount:d.bom.length, canBuild:buildable>0,
+          buildableColor: buildable===0?'#dc2626':(buildable<5?'#b45309':'#15803d'), buildableBg: buildable===0?'#fef2f2':(buildable<5?'#fffbeb':'#f0fdf4'),
+          bannerBg: buildable===0?'#fef2f2':(buildable<5?'#fffbeb':'#f0fdf4'), bannerBorder: buildable===0?'#fecaca':(buildable<5?'#fde68a':'#bbf7d0'),
+          limitNames: limitNames.join(', '), limitCount: limitNames.length };
+      }
+    }
+
+    const cu = s.user || {};
+    const avBg = h => `oklch(0.92 0.05 ${h})`, avFg = h => `oklch(0.45 0.13 ${h})`;
+
+    return {
+      accent, company: this.props.companyName || 'Müller Maschinenbau GmbH', showAi: this.props.showAiTeaser !== false,
+      isLogin: s.screen==='login', isApp: s.screen==='app',
+      toast: s.toast,
+      // login
+      isLoginMode: s.loginMode!=='register', isRegisterMode: s.loginMode==='register',
+      showLogin: ()=>this.setLoginMode('login'), showRegister: ()=>this.setLoginMode('register'),
+      users: s.users.map(u => ({ ...u, select:()=>this.pickLoginUser(u.id),
+        borderColor: s.loginUser===u.id ? accent : '#e5e7eb', bgColor: s.loginUser===u.id ? '#eff6ff' : '#fff',
+        avatarBg: avBg(u.hue), avatarFg: avFg(u.hue) })),
+      pin: s.pin, onPin: e=>this.setState({pin:e.target.value, authError:''}),
+      loginDisabled: !s.loginUser || !s.pin, loginBtnBg: (s.loginUser && s.pin) ? accent : '#cbd5e1',
+      doLogin: this.doLogin, authError: s.authError, hasAuthError: !!s.authError,
+      // registration
+      regName: s.reg.name, regRole: s.reg.role, regPass: s.reg.pass, regPass2: s.reg.pass2,
+      onRegName: this.regField('name'), onRegRole: this.regField('role'), onRegPass: this.regField('pass'), onRegPass2: this.regField('pass2'),
+      regRoleOptions: this.roleOptions, submitRegister: this.submitRegister, regError: s.regError, hasRegError: !!s.regError,
+      // shell
+      navItems, pageTitle: titles[s.view] || 'Dashboard',
+      navOpen: s.navOpen, toggleNav: this.toggleNav, closeNav: this.closeNav,
+      currentName: cu.name||'', currentRole: cu.role||'', currentInitials: cu.initials||'',
+      currentUserBg: avBg(cu.hue||220), currentUserFg: avFg(cu.hue||220),
+      logout: ()=>this.setState({ screen:'login', user:null, loginUser:null, view:'dashboard' }),
+      goSearch: ()=>this.go('teile'), goBuchen: ()=>this.go('buchen'), goWarnungen:()=>this.go('warnungen'),
+      goHistorie:()=>this.go('historie'), aiTeaser:()=>this.go('bestellung'),
+      // views
+      isDashboard: s.view==='dashboard', isBuchen: s.view==='buchen', isTeile: s.view==='teile',
+      isDetail: s.view==='detail', isWarnungen: s.view==='warnungen', isHistorie: s.view==='historie',
+      // dashboard
+      stats: [
+        { label:'Teile gesamt', value:s.parts.length, sub:totalUnits.toLocaleString('de-DE')+' Einheiten', dot:accent, color:'#111827' },
+        { label:'Kritische Teile', value:critical.length, sub:'unter Mindestbestand', dot:'#dc2626', color: critical.length?'#dc2626':'#111827' },
+        { label:'Bald bestellen', value:reorder.length, sub:'Bestand niedrig', dot:'#d97706', color: reorder.length?'#b45309':'#111827' },
+        { label:'Buchungen heute', value:todayTx.length, sub:'Entnahmen & Einlagerungen', dot:'#15803d', color:'#111827' },
+      ],
+      dashCritical: critical.slice(0,6), noCritical: critical.length===0,
+      dashRecent: s.transactions.slice(0,6).map(txView),
+
+      // ---- Buchen ----
+      scanCode: s.scanCode, onScanCode: e=>this.setState({scanCode:e.target.value}),
+      onScanKey: this.onScanKey, doScan: this.doScan, scanError: s.scanError, scanRef: this.scanRef,
+      hasScanError: !!s.scanError,
+      bookPart: s.bookPart ? withStatus(s.bookPart) : null, hasBookPart: !!s.bookPart,
+      bookType: s.bookType, isEntnahme: s.bookType==='entnahme', isEinlagerung: s.bookType==='einlagerung',
+      setEntnahme: ()=>this.setBookType('entnahme'), setEinlagerung: ()=>this.setBookType('einlagerung'),
+      bookQty: s.bookQty, qtyMinus: ()=>this.bumpQty(-1), qtyPlus: ()=>this.bumpQty(1),
+      onQty: e=>{ const v=parseInt(e.target.value,10); this.setState({bookQty: isNaN(v)?1:Math.max(1,v)}); }, qtyRef: this.qtyRef,
+      bookTypeColor: s.bookType==='entnahme' ? '#b45309' : '#15803d',
+      scanPrompt: !s.bookPart && !s.bookDone,
+      entnahmeBorder: s.bookType==='entnahme' ? '#d97706' : '#e5e7eb', entnahmeBg: s.bookType==='entnahme' ? '#fffbeb' : '#fff', entnahmeFg: s.bookType==='entnahme' ? '#b45309' : '#374151',
+      einBorder: s.bookType==='einlagerung' ? '#16a34a' : '#e5e7eb', einBg: s.bookType==='einlagerung' ? '#f0fdf4' : '#fff', einFg: s.bookType==='einlagerung' ? '#15803d' : '#374151',
+      projBestand: s.bookPart ? (s.bookType==='entnahme' ? Math.max(0, s.bookPart.bestand - s.bookQty) : s.bookPart.bestand + s.bookQty) : 0,
+      bookOver: !!(s.bookPart && s.bookType==='entnahme' && s.bookQty > s.bookPart.bestand),
+      bookMax: s.bookPart ? s.bookPart.bestand : 0,
+      confirmBooking: this.confirmBooking, cancelBook: this.cancelBook,
+      bookDone: s.bookDone, hasBookDone: !!s.bookDone,
+      bookDoneEin: s.bookDone && s.bookDone.type==='Einlagerung',
+      newBooking: this.newBooking,
+      quickScans: ['LAG-6205-2RS','ORG-25X3-NBR','SHR-M8X40-933','ZHR-M2-Z40'].map(c=>({ code:c, pick:()=>this.setState({scanCode:c},()=>this.doScan()) })),
+
+      // ---- Teile & Suche ----
+      search: s.search, onSearch: e=>this.setState({search:e.target.value}), clearSearch: ()=>this.setState({search:''}),
+      hasQuery: !!q, listed, listedCount: listed.length, totalCount: s.parts.length,
+      cats: cats.map(c=>({ name:c, active:c===s.filterCat, pick:()=>this.setState({filterCat:c}),
+        bg: c===s.filterCat ? accent : '#fff', fg: c===s.filterCat ? '#fff' : '#475569', border: c===s.filterCat ? accent : '#e5e7eb' })),
+      sortKey: s.sortKey, sortByName: ()=>this.setState({sortKey:'bezeichnung'}), sortByStock: ()=>this.setState({sortKey:'bestand'}),
+      sortNameBorder: s.sortKey==='bezeichnung'?accent:'#e5e7eb', sortNameBg: s.sortKey==='bezeichnung'?'#eff6ff':'#fff', sortNameFg: s.sortKey==='bezeichnung'?accent:'#475569',
+      sortStockBorder: s.sortKey==='bestand'?accent:'#e5e7eb', sortStockBg: s.sortKey==='bestand'?'#eff6ff':'#fff', sortStockFg: s.sortKey==='bestand'?accent:'#475569',
+      startCreate: this.startCreate, noResults: listed.length===0,
+
+      // ---- Detail ----
+      selPart, hasSel: !!selPart, selTx, selTxCount: selTx.length, noSelTx: selPart && selTx.length===0,
+      backToList: ()=>this.go('teile'),
+      editing: s.editing, creating: s.creating, editDraft: s.editDraft || {},
+      showDetailCard: !!selPart && !s.editing,
+      editTitle: s.creating ? 'Neues Teil anlegen' : 'Teil bearbeiten',
+      startEdit: this.startEdit, cancelEdit: this.cancelEdit, saveEdit: this.saveEdit,
+      efBezeichnung: this.editField('bezeichnung'), efNummer: this.editField('nummer'), efLagerplatz: this.editField('lagerplatz'),
+      efBestand: this.editField('bestand'), efMindest: this.editField('mindestbestand'), efKategorie: this.editField('kategorie'), efEinheit: this.editField('einheit'),
+      editCats: this.existingCats(), editCatNew: s.editCatNew, efKategorieSelect: this.editCatSelect,
+      editCatSelectValue: s.editCatNew ? '__new__' : (s.editDraft ? s.editDraft.kategorie : ''),
+      detailBookEntnahme: ()=>{ if(selPart) this.setState({view:'buchen', bookPart:s.parts.find(p=>p.id===selPart.id), bookType:'entnahme', bookQty:1, bookDone:null}); },
+      detailBookEinlagerung: ()=>{ if(selPart) this.setState({view:'buchen', bookPart:s.parts.find(p=>p.id===selPart.id), bookType:'einlagerung', bookQty:1, bookDone:null}); },
+      deleteSelPart: ()=>{ if(selPart) this.deletePart(selPart.id); },
+
+      // ---- Baubarkeit ----
+      isBaubarkeit: s.view==='baubarkeit',
+      drawingQuery: s.drawingQuery, onDrawingQuery: e=>this.setState({drawingQuery:e.target.value}), onDrawingKey: this.onDrawingKey,
+      doDrawingScan: this.doDrawingScan, drawingScanRef: this.drawingScanRef, drawingError: s.drawingError, hasDrawingError: !!s.drawingError,
+      drawingPrompt: !s.drawingId, drawingResult, hasDrawing: !!drawingResult, clearDrawing: this.clearDrawing,
+      drawingNotBuildable: !!drawingResult && !drawingResult.canBuild,
+      quickDrawings: this.drawings.map(d=>({ nummer:d.nummer, bezeichnung:d.bezeichnung, pick:()=>this.setState({drawingId:d.id, drawingError:''}) })),
+
+      // ---- Lagerplätze ----
+      isLagerplaetze: s.view==='lagerplaetze',
+      ...(()=>{
+        // group parts by lagerplatz
+        const map = {};
+        partsS.forEach(p => { const k=p.lagerplatz; (map[k]=map[k]||[]).push(p); });
+        const zoneName = code => this.zoneNames[(code||'')[0]] || 'Lager';
+        const bq = s.binSearch.trim().toLowerCase();
+        let bins = Object.keys(map).sort().map(code => {
+          const items = map[code];
+          const crit = items.filter(p=>p.statusKey==='kritisch'||p.statusKey==='leer').length;
+          return { code, zone:zoneName(code), zoneLetter:code[0], count:items.length, totalUnits:items.reduce((a,p)=>a+p.bestand,0),
+            crit, hasCrit:crit>0, items, qr:this.qrSvg('LAGERPLATZ:'+code, 120),
+            open:()=>this.setState({binCode:code, binError:'', view:'lagerplaetze'}) };
+        });
+        if (bq) bins = bins.filter(b => b.code.toLowerCase().includes(bq) || b.zone.toLowerCase().includes(bq) || b.items.some(i=>i.bezeichnung.toLowerCase().includes(bq)||i.nummer.toLowerCase().includes(bq)));
+        const detail = s.binCode ? (()=>{ const items=(map[s.binCode]||[]); return {
+          code:s.binCode, zone:zoneName(s.binCode), zoneLetter:s.binCode[0], count:items.length,
+          totalUnits:items.reduce((a,p)=>a+p.bestand,0), items, qr:this.qrSvg('LAGERPLATZ:'+s.binCode, 200), qrLabel:'LAGERPLATZ:'+s.binCode,
+          empty: items.length===0 }; })() : null;
+        return {
+          binMode: s.binMode, binModeScan: s.binMode==='scan', binModeList: s.binMode==='list',
+          setBinScan:()=>this.setBinMode('scan'), setBinList:()=>this.setBinMode('list'),
+          binScanModeBg: s.binMode==='scan'?accent:'#fff', binScanModeFg: s.binMode==='scan'?'#fff':'#475569',
+          binListModeBg: s.binMode==='list'?accent:'#fff', binListModeFg: s.binMode==='list'?'#fff':'#475569',
+          binQuery: s.binQuery, onBinQuery:e=>this.setState({binQuery:e.target.value}), onBinKey:this.onBinKey,
+          doBinScan:this.doBinScan, binScanRef:this.binScanRef, binError:s.binError, hasBinError:!!s.binError,
+          binSearch: s.binSearch, onBinSearch:e=>this.setState({binSearch:e.target.value}),
+          bins, binCount:bins.length, binDetail:detail, hasBinDetail:!!detail, clearBin:this.clearBin,
+          binPrompt: !s.binCode && s.binMode==='scan', binList: !s.binCode && s.binMode==='list',
+          printBin:this.printBin,
+        };
+      })(),
+
+      // ---- Nachbestellen ----
+      isBestellung: s.view==='bestellung',
+      ...(()=>{
+        const need = partsS.filter(p => p.bestand < p.mindestbestand*1.3)
+          .sort((a,b)=> (a.bestand/Math.max(1,a.mindestbestand)) - (b.bestand/Math.max(1,b.mindestbestand)))
+          .map(p => { const checked = s.reorderSel[p.id]!==false;
+            const qty = s.reorderQty[p.id]!==undefined ? s.reorderQty[p.id] : this.recommendQty(p);
+            const reason = (s.aiReasons||[]).find(r=>r.nummer===p.nummer);
+            return { ...p, checked, qty, onToggle:()=>this.toggleReorder(p.id), onQty:this.setReorderQty(p.id),
+              rowOpacity: checked?1:0.5, checkBg: checked?accent:'#fff', checkBorder: checked?accent:'#cbd5e1', checkMark: checked?'✓':'',
+              verbrauch:this.verbrauch(p.nummer), aiGrund: reason?reason.grund:'' }; });
+        const sel = need.filter(p=>p.checked && p.qty>0);
+        const totalPos = sel.length, totalMenge = sel.reduce((a,p)=>a+p.qty,0);
+        const recs = s.recipients.map(r => ({ ...r, toggle:()=>this.toggleRecipient(r.id),
+          checkBg: r.sel?accent:'#fff', checkBorder: r.sel?accent:'#cbd5e1', checkMark: r.sel?'✓':'' }));
+        const selRecs = s.recipients.filter(r=>r.sel).map(r=>r.email);
+        if (s.customEmail.trim()) selRecs.push(s.customEmail.trim());
+        const emailLines = sel.map(p => ({ key:p.id, text:`${p.qty} ${p.einheit} · ${p.bezeichnung} (${p.nummer})` }));
+        const orders = s.sentOrders.map(o => ({ ...o, when:this.fmtTime(o.ts), toLabel:o.to.join(', '),
+          partLabel: o.parts.map(x=>x.menge+'× '+x.bezeichnung).join(', ') }));
+        return {
+          orderTab: s.orderTab, tabVorschlag: s.orderTab==='vorschlag', tabEmail: s.orderTab==='email', tabGesendet: s.orderTab==='gesendet',
+          setTabVorschlag:()=>this.setOrderTab('vorschlag'), setTabEmail:()=>this.setOrderTab('email'), setTabGesendet:()=>this.setOrderTab('gesendet'),
+          tabVBg: s.orderTab==='vorschlag'?'#fff':'transparent', tabVFg: s.orderTab==='vorschlag'?'#111827':'#6b7280', tabVSh: s.orderTab==='vorschlag'?'0 1px 3px rgba(15,23,42,.12)':'none',
+          tabEBg: s.orderTab==='email'?'#fff':'transparent', tabEFg: s.orderTab==='email'?'#111827':'#6b7280', tabESh: s.orderTab==='email'?'0 1px 3px rgba(15,23,42,.12)':'none',
+          tabGBg: s.orderTab==='gesendet'?'#fff':'transparent', tabGFg: s.orderTab==='gesendet'?'#111827':'#6b7280', tabGSh: s.orderTab==='gesendet'?'0 1px 3px rgba(15,23,42,.12)':'none',
+          reorderList: need, reorderCount: need.length, noReorder: need.length===0, hasReorder: need.length>0,
+          selPos: totalPos, selMenge: totalMenge,
+          runSuggestion: this.runSuggestion, aiReasons: s.aiReasons||[], hasAiReasons: (s.aiReasons||[]).length>0,
+          suggestBtnLabel: 'Bestellvorschlag berechnen',
+          recipients: recs, customEmail: s.customEmail, onCustomEmail:e=>this.setState({customEmail:e.target.value}),
+          emailNote: s.emailNote, onEmailNote:e=>this.setState({emailNote:e.target.value}),
+          emailSubjectText: 'Nachbestellung Lager — '+totalPos+' Positionen',
+          emailToLabel: selRecs.join(', ') || '— keine Empfänger gewählt —',
+          emailLines, sendEmail: this.sendEmail, canSend: totalPos>0,
+          sentOrders: orders, sentCount: orders.length, noSent: orders.length===0,
+        };
+      })(),
+
+      // ---- Warnungen ----
+      warnCritical: critical, warnReorder: reorder, warnCriticalCount: critical.length, warnReorderCount: reorder.length,
+      allGood: critical.length===0 && reorder.length===0,
+
+      // ---- Personal / Benutzerverwaltung ----
+      isPersonal: s.view==='personal',
+      personalUsers: s.users.map(u => ({ ...u, avatarBg:avBg(u.hue), avatarFg:avFg(u.hue),
+        isSelf: !!(s.user && s.user.id===u.id), onEdit:()=>this.startUserEdit(u.id), onDelete:()=>this.deleteUser(u.id) })),
+      userCount: s.users.length, startUserCreate: this.startUserCreate,
+      userEditing: s.userEditing, userDraft: s.userDraft || {},
+      userEditTitle: (s.userDraft && s.userDraft.id) ? 'Mitarbeiter bearbeiten' : 'Neuen Mitarbeiter anlegen',
+      userIsEdit: !!(s.userDraft && s.userDraft.id),
+      ufName: this.userField('name'), ufRole: this.userField('role'), ufPass: this.userField('password'), ufAdmin: this.userField('admin'),
+      saveUser: this.saveUser, cancelUser: this.cancelUser, userError: s.userError, hasUserError: !!s.userError,
+      roleOptions: this.roleOptions,
+
+      // ---- Konto / Passwort ändern ----
+      openPwModal: this.openPwModal, closePwModal: this.closePwModal, pwModal: s.pwModal,
+      pwCur: s.pwCur, pwNew: s.pwNew, pwNew2: s.pwNew2,
+      onPwCur: e=>this.setState({pwCur:e.target.value, pwError:''}),
+      onPwNew: e=>this.setState({pwNew:e.target.value, pwError:''}),
+      onPwNew2: e=>this.setState({pwNew2:e.target.value, pwError:''}),
+      submitPwChange: this.submitPwChange, pwError: s.pwError, hasPwError: !!s.pwError,
+
+      // ---- Historie ----
+      allTx: s.transactions.map(txView), allTxCount: s.transactions.length,
+      todayCount: todayTx.length,
+    };
+  }
+
+  render() {
+    const V = this.computeVals();
+    const accent = V.accent;
+    return (
+      <div style={css("font-family:'IBM Plex Sans',system-ui,sans-serif;height:100vh;width:100%;background:#f4f5f7;color:#1f2937;display:flex;flex-direction:column;overflow:hidden")}>
+
+        {V.isLogin && (
+          <div style={css("flex:1;display:flex;align-items:center;justify-content:center;background:radial-gradient(120% 120% at 50% 0%,#eef2f7 0%,#f4f5f7 55%)")}>
+            <div style={{...css("width:560px;max-width:92vw;background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:40px 44px;animation:lpfade .4s ease"), boxShadow:'0 24px 60px -28px rgba(15,23,42,.28)'}}>
+              <div style={css("display:flex;align-items:center;gap:12px;margin-bottom:6px")}>
+                <div style={css(`width:40px;height:40px;border-radius:10px;background:${accent};display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:18px;letter-spacing:.5px`)}>LP</div>
+                <div>
+                  <div style={css("font-size:20px;font-weight:700;letter-spacing:-.01em")}>LagerPilot</div>
+                  <div style={css("font-size:13px;color:#6b7280")}>{V.company}</div>
+                </div>
+              </div>
+              {V.isLoginMode && (<React.Fragment>
+                <div style={css("margin:22px 0 12px;font-size:14px;color:#6b7280")}>Anmelden — Mitarbeiter wählen</div>
+                <div style={css("display:grid;grid-template-columns:1fr 1fr;gap:10px")}>
+                  {V.users.map(u => (
+                    <Hx key={u.id} tag="button" onClick={u.select} css={`display:flex;align-items:center;gap:11px;padding:12px 14px;border-radius:11px;border:1.5px solid ${u.borderColor};background:${u.bgColor};text-align:left;transition:all .12s`} hover={`border-color:${accent}`}>
+                      <div style={css(`width:34px;height:34px;border-radius:50%;flex:none;background:${u.avatarBg};color:${u.avatarFg};display:flex;align-items:center;justify-content:center;font-weight:600;font-size:13px`)}>{u.initials}</div>
+                      <div style={css("min-width:0")}>
+                        <div style={css("font-size:14px;font-weight:600;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{u.name}</div>
+                        <div style={css("font-size:12px;color:#6b7280")}>{u.role}</div>
+                      </div>
+                    </Hx>
+                  ))}
+                </div>
+                <div style={css("display:flex;align-items:center;gap:12px;margin-top:22px")}>
+                  <div style={css("flex:1")}>
+                    <div style={css("font-size:12px;color:#6b7280;margin-bottom:5px")}>Passwort</div>
+                    <Hx tag="input" value={V.pin} onChange={V.onPin} onKeyDown={(e)=>{ if(e.key==='Enter') V.doLogin(); }} type="password" placeholder="Passwort eingeben" maxLength="40" css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:15px;outline:none" focus={`border-color:${accent}`} />
+                  </div>
+                  <button onClick={V.doLogin} disabled={V.loginDisabled} style={css(`align-self:flex-end;padding:12px 22px;border:none;border-radius:10px;background:${V.loginBtnBg};color:#fff;font-size:15px;font-weight:600;box-shadow:0 6px 16px -8px ${accent}`)}>Anmelden →</button>
+                </div>
+                {V.hasAuthError && (
+                  <div style={css("margin-top:12px;padding:10px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;color:#dc2626;font-size:13px;text-align:center")}>{V.authError}</div>
+                )}
+                <div style={css("display:flex;align-items:center;justify-content:center;gap:6px;margin-top:18px;font-size:13px;color:#6b7280")}>
+                  <span>Noch kein Konto?</span>
+                  <button onClick={V.showRegister} style={css(`border:none;background:transparent;color:${accent};font-size:13px;font-weight:600;padding:0`)}>Registrieren</button>
+                </div>
+                <div style={css("margin-top:10px;font-size:11.5px;color:#9ca3af;text-align:center")}>Demo-Konten: Passwort <b>1234</b> · Daten lokal im Browser</div>
+              </React.Fragment>)}
+
+              {V.isRegisterMode && (<React.Fragment>
+                <div style={css("margin:22px 0 14px;font-size:14px;color:#6b7280")}>Neues Konto erstellen</div>
+                <div style={css("display:grid;grid-template-columns:1fr 1fr;gap:14px")}>
+                  <div style={css("grid-column:1 / -1")}>
+                    <div style={css("font-size:12px;color:#6b7280;margin-bottom:5px")}>Name *</div>
+                    <Hx tag="input" value={V.regName} onChange={V.onRegName} placeholder="z. B. Max Mustermann" css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:15px;outline:none" focus={`border-color:${accent}`} />
+                  </div>
+                  <div style={css("grid-column:1 / -1")}>
+                    <div style={css("font-size:12px;color:#6b7280;margin-bottom:5px")}>Rolle / Abteilung</div>
+                    <Hx tag="select" value={V.regRole} onChange={V.onRegRole} css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:15px;background:#fff;outline:none" focus={`border-color:${accent}`}>
+                      {V.regRoleOptions.map(r => <option key={r} value={r}>{r}</option>)}
+                    </Hx>
+                  </div>
+                  <div>
+                    <div style={css("font-size:12px;color:#6b7280;margin-bottom:5px")}>Passwort *</div>
+                    <Hx tag="input" value={V.regPass} onChange={V.onRegPass} type="password" placeholder="mind. 4 Zeichen" css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:15px;outline:none" focus={`border-color:${accent}`} />
+                  </div>
+                  <div>
+                    <div style={css("font-size:12px;color:#6b7280;margin-bottom:5px")}>Passwort bestätigen *</div>
+                    <Hx tag="input" value={V.regPass2} onChange={V.onRegPass2} onKeyDown={(e)=>{ if(e.key==='Enter') V.submitRegister(); }} type="password" placeholder="wiederholen" css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:15px;outline:none" focus={`border-color:${accent}`} />
+                  </div>
+                </div>
+                {V.hasRegError && (
+                  <div style={css("margin-top:12px;padding:10px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;color:#dc2626;font-size:13px;text-align:center")}>{V.regError}</div>
+                )}
+                <button onClick={V.submitRegister} style={css(`margin-top:18px;width:100%;padding:12px;border:none;border-radius:10px;background:${accent};color:#fff;font-size:15px;font-weight:600;box-shadow:0 6px 16px -8px ${accent}`)}>Konto erstellen</button>
+                <div style={css("display:flex;align-items:center;justify-content:center;gap:6px;margin-top:16px;font-size:13px;color:#6b7280")}>
+                  <button onClick={V.showLogin} style={css(`border:none;background:transparent;color:${accent};font-size:13px;font-weight:600;padding:0`)}>← Zurück zur Anmeldung</button>
+                </div>
+              </React.Fragment>)}
+            </div>
+          </div>
+        )}
+
+        {V.isApp && (
+          <div style={css("flex:1;display:flex;min-height:0;position:relative")}>
+
+            <div className={"lp-backdrop"+(V.navOpen?" lp-open":"")} onClick={V.closeNav}></div>
+
+            {/* Sidebar */}
+            <aside className={"lp-sidebar"+(V.navOpen?" lp-open":"")} style={css("width:230px;flex:none;background:#0f172a;color:#cbd5e1;display:flex;flex-direction:column;padding:18px 14px")}>
+              <div style={css("display:flex;align-items:center;gap:11px;padding:6px 8px 18px")}>
+                <div style={css(`width:36px;height:36px;border-radius:9px;background:${accent};display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:16px`)}>LP</div>
+                <div>
+                  <div style={css("font-size:16px;font-weight:700;color:#fff;letter-spacing:-.01em")}>LagerPilot</div>
+                  <div style={css("font-size:11px;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px")}>{V.company}</div>
+                </div>
+              </div>
+              <nav style={css("display:flex;flex-direction:column;gap:3px;margin-top:6px")}>
+                {V.navItems.map(n => (
+                  <Hx key={n.key} tag="button" onClick={n.onClick} css={`display:flex;align-items:center;gap:12px;padding:11px 12px;border:none;border-radius:9px;background:${n.bg};color:${n.fg};font-size:14.5px;font-weight:${n.weight};text-align:left;position:relative`} hover="background:rgba(255,255,255,.06)">
+                    <span style={css(`width:7px;height:7px;border-radius:50%;background:${n.dot};flex:none`)}></span>
+                    <span style={css("flex:1")}>{n.label}</span>
+                    {n.badge && <span style={css("background:#dc2626;color:#fff;font-size:11px;font-weight:600;padding:1px 7px;border-radius:9px")}>{n.badge}</span>}
+                  </Hx>
+                ))}
+              </nav>
+
+              {V.showAi && (<React.Fragment>
+                <div style={css("margin-top:auto")}></div>
+                <div style={css("margin-top:14px;padding:13px;border-radius:11px;background:linear-gradient(135deg,#1e293b,#172033);border:1px dashed #334155")}>
+                  <div style={css("display:flex;align-items:center;gap:7px;margin-bottom:6px")}>
+                    <span style={css("font-size:12px;font-weight:600;color:#e2e8f0")}>Bestellvorschlag</span>
+                  </div>
+                  <div style={css("font-size:11.5px;line-height:1.45;color:#64748b")}>Bestellmengen aus Bestand &amp; Verbrauch berechnen — und per E-Mail anfordern.</div>
+                  <button onClick={V.aiTeaser} style={css(`margin-top:9px;width:100%;padding:7px;border:none;border-radius:7px;background:${accent};color:#fff;font-size:12px;font-weight:600`)}>Nachbestellen öffnen</button>
+                </div>
+              </React.Fragment>)}
+
+              <div style={css("margin-top:14px;padding-top:13px;border-top:1px solid #1e293b;display:flex;align-items:center;gap:10px")}>
+                <div style={css(`width:32px;height:32px;border-radius:50%;background:${V.currentUserBg};color:${V.currentUserFg};display:flex;align-items:center;justify-content:center;font-weight:600;font-size:12px;flex:none`)}>{V.currentInitials}</div>
+                <div style={css("min-width:0;flex:1")}>
+                  <div style={css("font-size:13px;font-weight:600;color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{V.currentName}</div>
+                  <div style={css("font-size:11px;color:#64748b")}>{V.currentRole}</div>
+                </div>
+                <Hx tag="button" onClick={V.openPwModal} title="Passwort ändern" css="border:none;background:transparent;color:#64748b;font-size:15px;padding:4px" hover="color:#e2e8f0">⚙</Hx>
+                <Hx tag="button" onClick={V.logout} title="Abmelden" css="border:none;background:transparent;color:#64748b;font-size:16px;padding:4px" hover="color:#e2e8f0">⎋</Hx>
+              </div>
+            </aside>
+
+            {/* Main */}
+            <div style={css("flex:1;display:flex;flex-direction:column;min-width:0")}>
+              <header style={css("height:64px;flex:none;background:#fff;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;gap:16px;padding:0 26px")}>
+                <button onClick={V.toggleNav} className="lp-hamburger" title="Menü" style={css("align-items:center;justify-content:center;width:40px;height:40px;flex:none;border:1.5px solid #e5e7eb;border-radius:10px;background:#fff;font-size:18px;color:#374151;padding:0")}>☰</button>
+                <div style={css("flex:1;min-width:0")}>
+                  <div style={css("font-size:18px;font-weight:700;letter-spacing:-.01em;color:#111827;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{V.pageTitle}</div>
+                </div>
+                <Hx tag="button" onClick={V.goSearch} className="lp-search-btn" css="display:flex;align-items:center;gap:9px;width:280px;padding:9px 13px;border:1.5px solid #e5e7eb;border-radius:10px;background:#f9fafb;color:#9ca3af;font-size:14px;text-align:left" hover="border-color:#d1d5db">
+                  <span style={css("font-size:14px")}>⌕</span><span>Teil suchen…</span>
+                </Hx>
+                <button onClick={V.goBuchen} style={css(`display:flex;align-items:center;gap:8px;padding:10px 18px;border:none;border-radius:10px;background:${accent};color:#fff;font-size:14.5px;font-weight:600;box-shadow:0 6px 16px -9px ${accent};white-space:nowrap`)}><span style={css("font-size:15px")}>⊞</span> Buchen</button>
+              </header>
+
+              <main className="lp-scroll lp-main-pad" style={css("flex:1;overflow-y:auto;padding:26px")}>
+
+                {/* DASHBOARD */}
+                {V.isDashboard && (
+                <div style={css("animation:lpfade .3s ease")}>
+                  <div className="lp-grid-4" style={css("display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:22px")}>
+                    {V.stats.map((s,i) => (
+                      <div key={i} style={css("background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:18px 20px;box-shadow:0 1px 2px rgba(15,23,42,.04)")}>
+                        <div style={css("display:flex;align-items:center;justify-content:space-between")}>
+                          <div style={css("font-size:13px;color:#6b7280;font-weight:500")}>{s.label}</div>
+                          <div style={css(`width:9px;height:9px;border-radius:50%;background:${s.dot}`)}></div>
+                        </div>
+                        <div style={css(`font-size:34px;font-weight:700;letter-spacing:-.02em;margin-top:8px;color:${s.color}`)}>{s.value}</div>
+                        <div style={css("font-size:12px;color:#9ca3af;margin-top:2px")}>{s.sub}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="lp-grid-dash" style={css("display:grid;grid-template-columns:1.35fr 1fr;gap:16px")}>
+                    {/* Kritische Teile */}
+                    <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden")}>
+                      <div style={css("display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #f0f1f3")}>
+                        <div style={css("font-size:15px;font-weight:600;color:#111827")}>Handlungsbedarf</div>
+                        <button onClick={V.goWarnungen} style={css(`border:none;background:transparent;color:${accent};font-size:13px;font-weight:600`)}>Alle ansehen →</button>
+                      </div>
+                      <div>
+                        {V.dashCritical.map(p => (
+                          <Hx key={p.id} tag="button" onClick={p.open} css="width:100%;display:flex;align-items:center;gap:14px;padding:13px 20px;border:none;border-bottom:1px solid #f4f5f7;background:#fff;text-align:left" hover="background:#fafafa">
+                            <div style={css("flex:1;min-width:0")}>
+                              <div style={css("font-size:14px;font-weight:600;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{p.bezeichnung}</div>
+                              <div style={css("font-family:'IBM Plex Mono',monospace;font-size:12px;color:#9ca3af;margin-top:2px")}>{p.nummer} · {p.lagerplatz}</div>
+                            </div>
+                            <div style={css("text-align:right;flex:none")}>
+                              <div style={css("font-size:14px;font-weight:600;color:#1f2937")}><span style={css(`color:${p.statusColor}`)}>{p.bestand}</span> <span style={css("color:#cbd5e1")}>/ {p.mindestbestand}</span></div>
+                              <div style={css("font-size:11px;color:#9ca3af")}>Bestand / Min.</div>
+                            </div>
+                            <span style={css(`flex:none;font-size:11px;font-weight:600;padding:4px 9px;border-radius:7px;background:${p.statusBg};color:${p.statusColor}`)}>{p.statusLabel}</span>
+                          </Hx>
+                        ))}
+                        {V.noCritical && (
+                          <div style={css("padding:30px;text-align:center;color:#9ca3af;font-size:14px")}>Alles im grünen Bereich ✓</div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Letzte Buchungen */}
+                    <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden")}>
+                      <div style={css("display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #f0f1f3")}>
+                        <div style={css("font-size:15px;font-weight:600;color:#111827")}>Letzte Buchungen</div>
+                        <button onClick={V.goHistorie} style={css(`border:none;background:transparent;color:${accent};font-size:13px;font-weight:600`)}>Verlauf →</button>
+                      </div>
+                      <div>
+                        {V.dashRecent.map(t => (
+                          <div key={t.id} style={css("display:flex;align-items:center;gap:12px;padding:11px 20px;border-bottom:1px solid #f4f5f7")}>
+                            <div style={css(`width:30px;height:30px;border-radius:8px;flex:none;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;background:${t.tBg};color:${t.tColor}`)}>{t.sign}</div>
+                            <div style={css("flex:1;min-width:0")}>
+                              <div style={css("font-size:13.5px;font-weight:500;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{t.bezeichnung}</div>
+                              <div style={css("font-size:11.5px;color:#9ca3af")}>{t.user} · {t.when}</div>
+                            </div>
+                            <div style={css(`font-size:14px;font-weight:600;color:${t.tColor};flex:none`)}>{t.deltaLabel}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                )}
+
+                {/* BUCHEN */}
+                {V.isBuchen && (
+                <div style={css("max-width:760px;margin:0 auto;animation:lpfade .3s ease")}>
+
+                  {V.hasBookDone && (
+                    <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:40px;text-align:center;box-shadow:0 1px 2px rgba(15,23,42,.04)")}>
+                      <div style={css("width:64px;height:64px;border-radius:50%;background:#f0fdf4;color:#15803d;display:flex;align-items:center;justify-content:center;font-size:32px;margin:0 auto 18px")}>✓</div>
+                      <div style={css("font-size:20px;font-weight:700;color:#111827")}>{V.bookDone.type} gebucht</div>
+                      <div style={css("font-size:15px;color:#6b7280;margin-top:6px")}>{V.bookDone.menge}× {V.bookDone.bezeichnung}</div>
+                      <div style={css("display:inline-flex;align-items:center;gap:10px;margin-top:18px;padding:12px 20px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:11px")}>
+                        <span style={css("font-size:13px;color:#6b7280")}>Neuer Bestand</span>
+                        <span style={css("font-family:'IBM Plex Mono',monospace;font-size:20px;font-weight:600;color:#111827")}>{V.bookDone.rest}</span>
+                        <span style={css("font-size:13px;color:#9ca3af")}>{V.bookDone.einheit}</span>
+                      </div>
+                      <div style={css("display:flex;gap:12px;justify-content:center;margin-top:26px")}>
+                        <button onClick={V.newBooking} style={css(`padding:13px 26px;border:none;border-radius:11px;background:${accent};color:#fff;font-size:15px;font-weight:600`)}>Weitere Buchung</button>
+                      </div>
+                    </div>
+                  )}
+
+                  {V.hasBookPart && (
+                    <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(15,23,42,.04)")}>
+                      <div style={css("padding:22px 26px;border-bottom:1px solid #f0f1f3;display:flex;align-items:flex-start;gap:16px")}>
+                        <div style={css("flex:1;min-width:0")}>
+                          <div style={css("font-size:19px;font-weight:700;color:#111827")}>{V.bookPart.bezeichnung}</div>
+                          <div style={css("font-family:'IBM Plex Mono',monospace;font-size:13px;color:#6b7280;margin-top:4px")}>{V.bookPart.nummer} · Lagerplatz {V.bookPart.lagerplatz}</div>
+                        </div>
+                        <div style={css("text-align:right;flex:none")}>
+                          <div style={css("font-size:12px;color:#9ca3af")}>Aktueller Bestand</div>
+                          <div style={css("font-family:'IBM Plex Mono',monospace;font-size:26px;font-weight:600;color:#111827")}>{V.bookPart.bestand} <span style={css("font-size:14px;color:#9ca3af")}>{V.bookPart.einheit}</span></div>
+                        </div>
+                      </div>
+                      <div style={css("padding:24px 26px")}>
+                        <div style={css("display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:22px")}>
+                          <button onClick={V.setEntnahme} style={css(`padding:16px;border:2px solid ${V.entnahmeBorder};border-radius:13px;background:${V.entnahmeBg};text-align:left`)}>
+                            <div style={css(`font-size:16px;font-weight:700;color:${V.entnahmeFg}`)}>− Entnahme</div>
+                            <div style={css("font-size:12.5px;color:#6b7280;margin-top:2px")}>Teil aus dem Lager nehmen</div>
+                          </button>
+                          <button onClick={V.setEinlagerung} style={css(`padding:16px;border:2px solid ${V.einBorder};border-radius:13px;background:${V.einBg};text-align:left`)}>
+                            <div style={css(`font-size:16px;font-weight:700;color:${V.einFg}`)}>+ Einlagerung</div>
+                            <div style={css("font-size:12.5px;color:#6b7280;margin-top:2px")}>Teil ins Lager legen</div>
+                          </button>
+                        </div>
+                        <div style={css("display:flex;align-items:center;justify-content:space-between;gap:20px")}>
+                          <div style={css("font-size:15px;font-weight:600;color:#374151")}>Menge</div>
+                          <div style={css("display:flex;align-items:center;gap:12px")}>
+                            <button onClick={V.qtyMinus} style={css("width:52px;height:52px;border:1.5px solid #e5e7eb;border-radius:12px;background:#fff;font-size:26px;font-weight:600;color:#374151")}>−</button>
+                            <Hx tag="input" value={V.bookQty} onChange={V.onQty} innerRef={V.qtyRef} type="number" inputMode="numeric" css="width:96px;height:52px;text-align:center;border:1.5px solid #e5e7eb;border-radius:12px;font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:600;outline:none" focus={`border-color:${accent}`} />
+                            <button onClick={V.qtyPlus} style={css("width:52px;height:52px;border:1.5px solid #e5e7eb;border-radius:12px;background:#fff;font-size:26px;font-weight:600;color:#374151")}>+</button>
+                          </div>
+                        </div>
+                        <div style={css("display:flex;align-items:center;justify-content:space-between;margin-top:22px;padding:14px 18px;background:#f9fafb;border-radius:12px")}>
+                          <span style={css("font-size:14px;color:#6b7280")}>Bestand nach Buchung</span>
+                          <span style={css(`font-family:'IBM Plex Mono',monospace;font-size:20px;font-weight:600;color:${V.bookTypeColor}`)}>{V.projBestand} {V.bookPart.einheit}</span>
+                        </div>
+                        {V.bookOver && (
+                          <div style={css("margin-top:12px;padding:11px 16px;background:#fffbeb;border:1px solid #fde68a;border-radius:10px;color:#b45309;font-size:13px")}>Nur {V.bookMax} {V.bookPart.einheit} auf Lager — es können höchstens {V.bookMax} entnommen werden.</div>
+                        )}
+                        <div style={css("display:flex;gap:12px;margin-top:22px")}>
+                          <button onClick={V.cancelBook} style={css("padding:14px 22px;border:1.5px solid #e5e7eb;border-radius:12px;background:#fff;font-size:15px;font-weight:600;color:#374151")}>Abbrechen</button>
+                          <button onClick={V.confirmBooking} style={css(`flex:1;padding:14px;border:none;border-radius:12px;background:${accent};color:#fff;font-size:16px;font-weight:700;box-shadow:0 8px 20px -10px ${accent}`)}>Buchung bestätigen</button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {V.scanPrompt && (
+                    <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:36px;box-shadow:0 1px 2px rgba(15,23,42,.04)")}>
+                      <div style={css("text-align:center;margin-bottom:8px")}>
+                        <div style={css(`width:58px;height:58px;border-radius:14px;background:#eff6ff;color:${accent};display:flex;align-items:center;justify-content:center;font-size:28px;margin:0 auto 14px`)}>⊟</div>
+                        <div style={css("font-size:19px;font-weight:700;color:#111827")}>Barcode scannen oder Teilenummer eingeben</div>
+                        <div style={css("font-size:14px;color:#6b7280;margin-top:5px")}>Scanner-Code wird automatisch erkannt — oder manuell tippen und Enter drücken.</div>
+                      </div>
+                      <div style={css("display:flex;gap:10px;margin-top:24px;max-width:520px;margin-left:auto;margin-right:auto")}>
+                        <Hx tag="input" value={V.scanCode} onChange={V.onScanCode} onKeyDown={V.onScanKey} innerRef={V.scanRef} autoFocus placeholder="z. B. LAG-6205-2RS" css="flex:1;padding:15px 18px;border:1.5px solid #e5e7eb;border-radius:12px;font-family:'IBM Plex Mono',monospace;font-size:16px;outline:none" focus={`border-color:${accent}`} />
+                        <button onClick={V.doScan} style={css(`padding:15px 26px;border:none;border-radius:12px;background:${accent};color:#fff;font-size:15px;font-weight:600;white-space:nowrap`)}>Scannen</button>
+                      </div>
+                      {V.hasScanError && (
+                        <div style={css("max-width:520px;margin:12px auto 0;padding:11px 16px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;color:#dc2626;font-size:13.5px;text-align:center")}>{V.scanError}</div>
+                      )}
+                      <div style={css("max-width:520px;margin:26px auto 0")}>
+                        <div style={css("font-size:12px;font-weight:600;letter-spacing:.04em;color:#9ca3af;text-transform:uppercase;margin-bottom:10px")}>Schnellzugriff (Demo)</div>
+                        <div style={css("display:flex;flex-wrap:wrap;gap:8px")}>
+                          {V.quickScans.map(qs => (
+                            <Hx key={qs.code} tag="button" onClick={qs.pick} css="padding:9px 14px;border:1.5px solid #e5e7eb;border-radius:9px;background:#f9fafb;font-family:'IBM Plex Mono',monospace;font-size:13px;color:#374151" hover={`border-color:${accent};color:${accent}`}>{qs.code}</Hx>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                </div>
+                )}
+
+                {/* TEILE & SUCHE */}
+                {V.isTeile && (
+                <div style={css("animation:lpfade .3s ease")}>
+                  <div style={css("display:flex;align-items:center;gap:12px;margin-bottom:16px")}>
+                    <div style={css("flex:1;position:relative")}>
+                      <span style={css("position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:16px;color:#9ca3af")}>⌕</span>
+                      <Hx tag="input" value={V.search} onChange={V.onSearch} autoFocus placeholder="Suche nach Teilenummer, Bezeichnung oder Lagerplatz…" css="width:100%;padding:13px 16px 13px 40px;border:1.5px solid #e5e7eb;border-radius:12px;font-size:15px;background:#fff;outline:none" focus={`border-color:${accent}`} />
+                    </div>
+                    <button onClick={V.startCreate} style={css(`display:flex;align-items:center;gap:8px;padding:13px 20px;border:none;border-radius:12px;background:${accent};color:#fff;font-size:14.5px;font-weight:600;white-space:nowrap;box-shadow:0 6px 16px -9px ${accent}`)}><span style={css("font-size:17px")}>+</span> Neues Teil</button>
+                  </div>
+
+                  <div style={css("display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px")}>
+                    {V.cats.map(c => (
+                      <button key={c.name} onClick={c.pick} style={css(`padding:7px 14px;border:1.5px solid ${c.border};border-radius:9px;background:${c.bg};color:${c.fg};font-size:13px;font-weight:500`)}>{c.name}</button>
+                    ))}
+                    <div style={css("flex:1")}></div>
+                    <span style={css("font-size:13px;color:#9ca3af")}>Sortieren:</span>
+                    <button onClick={V.sortByName} style={css(`padding:7px 12px;border:1.5px solid ${V.sortNameBorder};border-radius:9px;background:${V.sortNameBg};color:${V.sortNameFg};font-size:13px;font-weight:500`)}>Bezeichnung</button>
+                    <button onClick={V.sortByStock} style={css(`padding:7px 12px;border:1.5px solid ${V.sortStockBorder};border-radius:9px;background:${V.sortStockBg};color:${V.sortStockFg};font-size:13px;font-weight:500`)}>Bestand</button>
+                  </div>
+
+                  <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden")}>
+                    <div style={css("display:grid;grid-template-columns:1.6fr 1fr 0.9fr 0.9fr 1fr;gap:12px;padding:12px 20px;background:#f9fafb;border-bottom:1px solid #f0f1f3;font-size:11.5px;font-weight:600;letter-spacing:.04em;color:#9ca3af;text-transform:uppercase")}>
+                      <div>Bezeichnung</div><div>Teilenummer</div><div>Lagerplatz</div><div style={css("text-align:right")}>Bestand</div><div style={css("text-align:right")}>Status</div>
+                    </div>
+                    {V.listed.map(p => (
+                      <Hx key={p.id} tag="button" onClick={p.open} css="width:100%;display:grid;grid-template-columns:1.6fr 1fr 0.9fr 0.9fr 1fr;gap:12px;align-items:center;padding:13px 20px;border:none;border-bottom:1px solid #f4f5f7;background:#fff;text-align:left" hover="background:#fafafa">
+                        <div style={css("min-width:0")}>
+                          <div style={css("font-size:14px;font-weight:600;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{p.bezeichnung}</div>
+                          <div style={css("font-size:11.5px;color:#9ca3af;margin-top:1px")}>{p.kategorie}</div>
+                        </div>
+                        <div style={css("font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#6b7280;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{p.nummer}</div>
+                        <div style={css("font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#6b7280")}>{p.lagerplatz}</div>
+                        <div style={css("text-align:right;font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:600;color:#1f2937")}>{p.bestand} <span style={css("font-size:11px;color:#cbd5e1;font-weight:400")}>/{p.mindestbestand}</span></div>
+                        <div style={css("text-align:right")}><span style={css(`font-size:11.5px;font-weight:600;padding:4px 9px;border-radius:7px;background:${p.statusBg};color:${p.statusColor};white-space:nowrap`)}>{p.statusLabel}</span></div>
+                      </Hx>
+                    ))}
+                    {V.noResults && (
+                      <div style={css("padding:40px;text-align:center;color:#9ca3af;font-size:14px")}>Keine Teile gefunden.</div>
+                    )}
+                  </div>
+                  <div style={css("margin-top:12px;font-size:12.5px;color:#9ca3af")}>{V.listedCount} von {V.totalCount} Teilen</div>
+                </div>
+                )}
+
+                {/* DETAIL / BEARBEITEN */}
+                {V.isDetail && (
+                <div style={css("max-width:880px;animation:lpfade .3s ease")}>
+                  <Hx tag="button" onClick={V.backToList} css="display:flex;align-items:center;gap:7px;border:none;background:transparent;color:#6b7280;font-size:14px;font-weight:500;padding:4px 0;margin-bottom:14px" hover="color:#1f2937">← Zurück zur Liste</Hx>
+
+                  {V.editing && (
+                    <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(15,23,42,.04)")}>
+                      <div style={css("padding:20px 26px;border-bottom:1px solid #f0f1f3;font-size:17px;font-weight:700;color:#111827")}>{V.editTitle}</div>
+                      <div style={css("padding:26px;display:grid;grid-template-columns:1fr 1fr;gap:18px")}>
+                        <div style={css("grid-column:1 / -1")}>
+                          <div style={css("font-size:12.5px;font-weight:600;color:#6b7280;margin-bottom:6px")}>Bezeichnung *</div>
+                          <Hx tag="input" value={V.editDraft.bezeichnung||''} onChange={V.efBezeichnung} placeholder="z. B. Rillenkugellager 6205-2RS" css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:14.5px;outline:none" focus={`border-color:${accent}`} />
+                        </div>
+                        <div>
+                          <div style={css("font-size:12.5px;font-weight:600;color:#6b7280;margin-bottom:6px")}>Teilenummer *</div>
+                          <Hx tag="input" value={V.editDraft.nummer||''} onChange={V.efNummer} placeholder="z. B. LAG-6205-2RS" css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-family:'IBM Plex Mono',monospace;font-size:14px;outline:none" focus={`border-color:${accent}`} />
+                        </div>
+                        <div>
+                          <div style={css("font-size:12.5px;font-weight:600;color:#6b7280;margin-bottom:6px")}>Lagerplatz</div>
+                          <Hx tag="input" value={V.editDraft.lagerplatz||''} onChange={V.efLagerplatz} placeholder="z. B. A-01-02" css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-family:'IBM Plex Mono',monospace;font-size:14px;outline:none" focus={`border-color:${accent}`} />
+                        </div>
+                        <div>
+                          <div style={css("font-size:12.5px;font-weight:600;color:#6b7280;margin-bottom:6px")}>Bestand</div>
+                          <Hx tag="input" value={V.editDraft.bestand} onChange={V.efBestand} type="number" inputMode="numeric" css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-family:'IBM Plex Mono',monospace;font-size:14px;outline:none" focus={`border-color:${accent}`} />
+                        </div>
+                        <div>
+                          <div style={css("font-size:12.5px;font-weight:600;color:#6b7280;margin-bottom:6px")}>Mindestbestand</div>
+                          <Hx tag="input" value={V.editDraft.mindestbestand} onChange={V.efMindest} type="number" inputMode="numeric" css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-family:'IBM Plex Mono',monospace;font-size:14px;outline:none" focus={`border-color:${accent}`} />
+                        </div>
+                        <div>
+                          <div style={css("font-size:12.5px;font-weight:600;color:#6b7280;margin-bottom:6px")}>Kategorie</div>
+                          <Hx tag="select" value={V.editCatSelectValue} onChange={V.efKategorieSelect} css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:14.5px;background:#fff;outline:none" focus={`border-color:${accent}`}>
+                            {V.editCats.map(c => <option key={c} value={c}>{c}</option>)}
+                            <option value="__new__">➕ Neue Kategorie…</option>
+                          </Hx>
+                          {V.editCatNew && (
+                            <Hx tag="input" value={V.editDraft.kategorie||''} onChange={V.efKategorie} placeholder="Neue Kategorie eingeben" css="width:100%;margin-top:8px;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:14.5px;outline:none" focus={`border-color:${accent}`} />
+                          )}
+                        </div>
+                        <div>
+                          <div style={css("font-size:12.5px;font-weight:600;color:#6b7280;margin-bottom:6px")}>Einheit</div>
+                          <Hx tag="input" value={V.editDraft.einheit||''} onChange={V.efEinheit} placeholder="Stk" css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:14.5px;outline:none" focus={`border-color:${accent}`} />
+                        </div>
+                      </div>
+                      <div style={css("display:flex;gap:12px;justify-content:flex-end;padding:18px 26px;border-top:1px solid #f0f1f3;background:#fafafa")}>
+                        <button onClick={V.cancelEdit} style={css("padding:11px 20px;border:1.5px solid #e5e7eb;border-radius:10px;background:#fff;font-size:14.5px;font-weight:600;color:#374151")}>Abbrechen</button>
+                        <button onClick={V.saveEdit} style={css(`padding:11px 24px;border:none;border-radius:10px;background:${accent};color:#fff;font-size:14.5px;font-weight:600`)}>Speichern</button>
+                      </div>
+                    </div>
+                  )}
+
+                  {V.showDetailCard && (<React.Fragment>
+                    <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(15,23,42,.04)")}>
+                      <div style={css("padding:24px 28px;border-bottom:1px solid #f0f1f3;display:flex;align-items:flex-start;gap:16px")}>
+                        <div style={css("flex:1;min-width:0")}>
+                          <span style={css(`font-size:11.5px;font-weight:600;padding:4px 10px;border-radius:7px;background:${V.selPart.statusBg};color:${V.selPart.statusColor}`)}>{V.selPart.statusLabel}</span>
+                          <div style={css("font-size:22px;font-weight:700;color:#111827;margin-top:10px")}>{V.selPart.bezeichnung}</div>
+                          <div style={css("font-family:'IBM Plex Mono',monospace;font-size:13.5px;color:#6b7280;margin-top:4px")}>{V.selPart.nummer}</div>
+                        </div>
+                        <div style={css("display:flex;gap:8px;flex:none")}>
+                          <Hx tag="button" onClick={V.startEdit} css="display:flex;align-items:center;gap:7px;padding:10px 18px;border:1.5px solid #e5e7eb;border-radius:10px;background:#fff;font-size:14px;font-weight:600;color:#374151" hover={`border-color:${accent};color:${accent}`}>Bearbeiten</Hx>
+                          <Hx tag="button" onClick={V.deleteSelPart} title="Teil löschen" css="display:flex;align-items:center;gap:7px;padding:10px 16px;border:1.5px solid #fecaca;border-radius:10px;background:#fff;font-size:14px;font-weight:600;color:#dc2626" hover="background:#fef2f2">Löschen</Hx>
+                        </div>
+                      </div>
+                      <div className="lp-grid-4" style={css("display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:#f0f1f3")}>
+                        <div style={css("background:#fff;padding:18px 24px")}><div style={css("font-size:12px;color:#9ca3af")}>Lagerplatz</div><div style={css("font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;color:#111827;margin-top:4px")}>{V.selPart.lagerplatz}</div></div>
+                        <div style={css("background:#fff;padding:18px 24px")}><div style={css("font-size:12px;color:#9ca3af")}>Bestand</div><div style={css(`font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;color:${V.selPart.statusColor};margin-top:4px`)}>{V.selPart.bestand} {V.selPart.einheit}</div></div>
+                        <div style={css("background:#fff;padding:18px 24px")}><div style={css("font-size:12px;color:#9ca3af")}>Mindestbestand</div><div style={css("font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;color:#111827;margin-top:4px")}>{V.selPart.mindestbestand} {V.selPart.einheit}</div></div>
+                        <div style={css("background:#fff;padding:18px 24px")}><div style={css("font-size:12px;color:#9ca3af")}>Kategorie</div><div style={css("font-size:15px;font-weight:600;color:#111827;margin-top:6px")}>{V.selPart.kategorie}</div></div>
+                      </div>
+                      <div style={css("display:flex;gap:12px;padding:18px 28px;border-top:1px solid #f0f1f3")}>
+                        <button onClick={V.detailBookEntnahme} style={css("flex:1;padding:13px;border:1.5px solid #fde68a;border-radius:11px;background:#fffbeb;color:#b45309;font-size:15px;font-weight:600")}>− Entnahme buchen</button>
+                        <button onClick={V.detailBookEinlagerung} style={css("flex:1;padding:13px;border:1.5px solid #bbf7d0;border-radius:11px;background:#f0fdf4;color:#15803d;font-size:15px;font-weight:600")}>+ Einlagerung buchen</button>
+                      </div>
+                    </div>
+
+                    <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden;margin-top:16px")}>
+                      <div style={css("padding:16px 24px;border-bottom:1px solid #f0f1f3;font-size:15px;font-weight:600;color:#111827")}>Bewegungen dieses Teils</div>
+                      {V.selTx.map(t => (
+                        <div key={t.id} style={css("display:flex;align-items:center;gap:14px;padding:13px 24px;border-bottom:1px solid #f4f5f7")}>
+                          <div style={css(`width:30px;height:30px;border-radius:8px;flex:none;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;background:${t.tBg};color:${t.tColor}`)}>{t.sign}</div>
+                          <div style={css("flex:1")}><div style={css("font-size:14px;font-weight:600;color:#1f2937")}>{t.type}</div><div style={css("font-size:12px;color:#9ca3af")}>{t.user} · {t.whenFull}</div></div>
+                          <div style={css("text-align:right")}><div style={css(`font-size:14px;font-weight:600;color:${t.tColor}`)}>{t.deltaLabel} {V.selPart.einheit}</div><div style={css("font-size:11.5px;color:#9ca3af")}>Rest: {t.rest}</div></div>
+                        </div>
+                      ))}
+                      {V.noSelTx && (
+                        <div style={css("padding:28px;text-align:center;color:#9ca3af;font-size:13.5px")}>Noch keine Bewegungen erfasst.</div>
+                      )}
+                    </div>
+                  </React.Fragment>)}
+                </div>
+                )}
+
+                {/* BAUBARKEIT */}
+                {V.isBaubarkeit && (
+                <div style={css("max-width:860px;margin:0 auto;animation:lpfade .3s ease")}>
+
+                  {V.drawingPrompt && (
+                    <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:36px;box-shadow:0 1px 2px rgba(15,23,42,.04)")}>
+                      <div style={css("text-align:center")}>
+                        <div style={css(`width:58px;height:58px;border-radius:14px;background:#eff6ff;color:${accent};display:flex;align-items:center;justify-content:center;font-size:26px;margin:0 auto 14px`)}>▤</div>
+                        <div style={css("font-size:19px;font-weight:700;color:#111827")}>Wie oft ist eine Zeichnung baubar?</div>
+                        <div style={css("font-size:14px;color:#6b7280;margin-top:5px;max-width:520px;margin-left:auto;margin-right:auto")}>Zeichnungsnummer eingeben oder scannen — das System prüft alle benötigten Teile und bestätigt, wie viele Baugruppen aus dem aktuellen Bestand gefertigt werden können.</div>
+                      </div>
+                      <div style={css("display:flex;gap:10px;margin-top:24px;max-width:520px;margin-left:auto;margin-right:auto")}>
+                        <Hx tag="input" value={V.drawingQuery} onChange={V.onDrawingQuery} onKeyDown={V.onDrawingKey} innerRef={V.drawingScanRef} autoFocus placeholder="z. B. ZNG-1001-A" css="flex:1;padding:15px 18px;border:1.5px solid #e5e7eb;border-radius:12px;font-family:'IBM Plex Mono',monospace;font-size:16px;outline:none" focus={`border-color:${accent}`} />
+                        <button onClick={V.doDrawingScan} style={css(`padding:15px 26px;border:none;border-radius:12px;background:${accent};color:#fff;font-size:15px;font-weight:600;white-space:nowrap`)}>Prüfen</button>
+                      </div>
+                      {V.hasDrawingError && (
+                        <div style={css("max-width:520px;margin:12px auto 0;padding:11px 16px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;color:#dc2626;font-size:13.5px;text-align:center")}>{V.drawingError}</div>
+                      )}
+                      <div style={css("max-width:560px;margin:26px auto 0")}>
+                        <div style={css("font-size:12px;font-weight:600;letter-spacing:.04em;color:#9ca3af;text-transform:uppercase;margin-bottom:10px")}>Hinterlegte Zeichnungen (Demo)</div>
+                        <div style={css("display:flex;flex-direction:column;gap:8px")}>
+                          {V.quickDrawings.map(qd => (
+                            <Hx key={qd.nummer} tag="button" onClick={qd.pick} css="display:flex;align-items:center;gap:14px;padding:12px 16px;border:1.5px solid #e5e7eb;border-radius:11px;background:#fff;text-align:left" hover={`border-color:${accent}`}>
+                              <span style={css(`font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;color:${accent};white-space:nowrap`)}>{qd.nummer}</span>
+                              <span style={css("font-size:14px;color:#374151;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{qd.bezeichnung}</span>
+                              <span style={css("font-size:18px;color:#cbd5e1")}>→</span>
+                            </Hx>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {V.hasDrawing && (<React.Fragment>
+                    <div style={css("display:flex;align-items:flex-start;gap:14px;margin-bottom:16px")}>
+                      <div style={css("flex:1")}>
+                        <div style={css(`font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:600;color:${accent}`)}>{V.drawingResult.nummer}</div>
+                        <div style={css("font-size:22px;font-weight:700;color:#111827;margin-top:2px")}>{V.drawingResult.bezeichnung}</div>
+                        <div style={css("font-size:13px;color:#9ca3af;margin-top:2px")}>{V.drawingResult.partCount} Positionen in der Stückliste</div>
+                      </div>
+                      <Hx tag="button" onClick={V.clearDrawing} css="padding:11px 18px;border:1.5px solid #e5e7eb;border-radius:10px;background:#fff;font-size:14px;font-weight:600;color:#374151" hover={`border-color:${accent};color:${accent}`}>Neue Abfrage</Hx>
+                    </div>
+
+                    <div style={css(`background:${V.drawingResult.bannerBg};border:1px solid ${V.drawingResult.bannerBorder};border-radius:16px;padding:26px 30px;display:flex;align-items:center;gap:24px;margin-bottom:18px`)}>
+                      <div style={css("text-align:center;flex:none")}>
+                        <div style={css(`font-size:56px;font-weight:700;line-height:1;letter-spacing:-.03em;color:${V.drawingResult.buildableColor}`)}>{V.drawingResult.buildable}</div>
+                        <div style={css(`font-size:13px;font-weight:600;color:${V.drawingResult.buildableColor};margin-top:4px`)}>Stück baubar</div>
+                      </div>
+                      <div style={css(`width:1px;align-self:stretch;background:${V.drawingResult.bannerBorder}`)}></div>
+                      <div style={css("flex:1")}>
+                        {V.drawingResult.canBuild && (<React.Fragment>
+                          <div style={css("font-size:15.5px;font-weight:600;color:#111827")}>Diese Baugruppe kann {V.drawingResult.buildable}× komplett gefertigt werden.</div>
+                          <div style={css("font-size:13.5px;color:#6b7280;margin-top:4px")}>Limitierend: <b>{V.drawingResult.limitNames}</b> — danach ist dieses Teil aufgebraucht.</div>
+                        </React.Fragment>)}
+                        {V.drawingNotBuildable && (<React.Fragment>
+                          <div style={css("font-size:15.5px;font-weight:600;color:#dc2626")}>Aktuell nicht fertigbar.</div>
+                          <div style={css("font-size:13.5px;color:#6b7280;margin-top:4px")}>Es fehlt Bestand bei: <b>{V.drawingResult.limitNames}</b>.</div>
+                        </React.Fragment>)}
+                      </div>
+                    </div>
+
+                    <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden")}>
+                      <div style={css("display:grid;grid-template-columns:2fr 0.9fr 0.9fr 1.4fr;gap:12px;padding:12px 22px;background:#f9fafb;border-bottom:1px solid #f0f1f3;font-size:11.5px;font-weight:600;letter-spacing:.04em;color:#9ca3af;text-transform:uppercase")}>
+                        <div>Teil</div><div style={css("text-align:right")}>Bedarf/Stk</div><div style={css("text-align:right")}>Bestand</div><div style={css("text-align:right")}>Reicht für</div>
+                      </div>
+                      {V.drawingResult.lines.map(l => (
+                        <Hx key={l.nummer} tag="button" onClick={l.open} css={`width:100%;display:grid;grid-template-columns:2fr 0.9fr 0.9fr 1.4fr;gap:12px;align-items:center;padding:13px 22px;border:none;border-bottom:1px solid #f4f5f7;background:${l.rowBg};text-align:left`} hover="filter:brightness(0.985)">
+                          <div style={css("min-width:0")}>
+                            <div style={css("font-size:14px;font-weight:600;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{l.bezeichnung}</div>
+                            <div style={css("font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#9ca3af")}>{l.nummer} · {l.lagerplatz}</div>
+                          </div>
+                          <div style={css("text-align:right;font-family:'IBM Plex Mono',monospace;font-size:14px;color:#374151")}>{l.mengePer}×</div>
+                          <div style={css("text-align:right;font-family:'IBM Plex Mono',monospace;font-size:14px;color:#374151")}>{l.avail}</div>
+                          <div style={css("display:flex;align-items:center;gap:10px;justify-content:flex-end")}>
+                            <div style={css("flex:1;max-width:90px;height:6px;border-radius:3px;background:#eef0f3;overflow:hidden")}><div style={css(`height:100%;width:${l.barPct}%;background:${l.barColor}`)}></div></div>
+                            <span style={css(`font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:600;color:${l.possColor};min-width:30px;text-align:right`)}>{l.possible}×</span>
+                          </div>
+                        </Hx>
+                      ))}
+                    </div>
+                    <div style={css("margin-top:10px;font-size:12px;color:#9ca3af")}>Rot markiert = limitierende Position. Tippen Sie eine Zeile an, um zum Teil zu springen.</div>
+                  </React.Fragment>)}
+
+                </div>
+                )}
+
+                {/* LAGERPLÄTZE */}
+                {V.isLagerplaetze && (
+                <div style={css("max-width:980px;margin:0 auto;animation:lpfade .3s ease")}>
+
+                  {V.hasBinDetail && (
+                    <React.Fragment>
+                      <Hx tag="button" onClick={V.clearBin} className="lp-noprint" css="display:flex;align-items:center;gap:7px;border:none;background:transparent;color:#6b7280;font-size:14px;font-weight:500;padding:4px 0;margin-bottom:14px" hover="color:#1f2937">← Zurück zur Übersicht</Hx>
+                      <div className="lp-grid-side" style={css("display:grid;grid-template-columns:300px 1fr;gap:18px;align-items:start")}>
+                        <div className="lp-print-area" style={css("background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:24px;text-align:center;box-shadow:0 1px 2px rgba(15,23,42,.04)")}>
+                          <div style={css("font-size:11.5px;font-weight:600;letter-spacing:.06em;color:#9ca3af;text-transform:uppercase")}>Lagerplatz</div>
+                          <div style={css("font-family:'IBM Plex Mono',monospace;font-size:30px;font-weight:700;color:#111827;letter-spacing:.02em;margin:2px 0 4px")}>{V.binDetail.code}</div>
+                          <div style={css("font-size:13px;color:#6b7280;margin-bottom:16px")}>{V.binDetail.zone}</div>
+                          <div style={css("display:inline-block;padding:12px;border:1px solid #e5e7eb;border-radius:12px;background:#fff")}><img src={V.binDetail.qr} width="200" height="200" alt="QR-Code" style={css("display:block")} /></div>
+                          <div style={css("font-family:'IBM Plex Mono',monospace;font-size:11px;color:#9ca3af;margin-top:10px")}>{V.binDetail.qrLabel}</div>
+                          <Hx tag="button" onClick={V.printBin} className="lp-noprint" css="margin-top:16px;width:100%;padding:11px;border:1.5px solid #e5e7eb;border-radius:10px;background:#fff;font-size:14px;font-weight:600;color:#374151" hover={`border-color:${accent};color:${accent}`}>⎙ Etikett drucken</Hx>
+                        </div>
+                        <div className="lp-noprint" style={css("background:#fff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(15,23,42,.04)")}>
+                          <div style={css("display:flex;align-items:center;justify-content:space-between;padding:18px 22px;border-bottom:1px solid #f0f1f3")}>
+                            <div style={css("font-size:16px;font-weight:700;color:#111827")}>Inhalt dieses Lagerplatzes</div>
+                            <div style={css("font-size:13px;color:#9ca3af")}>{V.binDetail.count} Teile · {V.binDetail.totalUnits} Einheiten</div>
+                          </div>
+                          {V.binDetail.items.map(p => (
+                            <Hx key={p.id} tag="button" onClick={p.open} css="width:100%;display:flex;align-items:center;gap:14px;padding:14px 22px;border:none;border-bottom:1px solid #f4f5f7;background:#fff;text-align:left" hover="background:#fafafa">
+                              <div style={css("flex:1;min-width:0")}>
+                                <div style={css("font-size:14.5px;font-weight:600;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{p.bezeichnung}</div>
+                                <div style={css("font-family:'IBM Plex Mono',monospace;font-size:12px;color:#9ca3af;margin-top:2px")}>{p.nummer}</div>
+                              </div>
+                              <div style={css("text-align:right;flex:none")}><div style={css("font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:600;color:#1f2937")}>{p.bestand} <span style={css("font-size:11px;color:#cbd5e1")}>{p.einheit}</span></div></div>
+                              <span style={css(`flex:none;font-size:11px;font-weight:600;padding:4px 9px;border-radius:7px;background:${p.statusBg};color:${p.statusColor}`)}>{p.statusLabel}</span>
+                            </Hx>
+                          ))}
+                          {V.binDetail.empty && (
+                            <div style={css("padding:36px;text-align:center;color:#9ca3af;font-size:14px")}>Dieser Lagerplatz ist leer.</div>
+                          )}
+                        </div>
+                      </div>
+                    </React.Fragment>
+                  )}
+
+                  {V.binPrompt && (
+                    <React.Fragment>
+                      <div style={css("display:flex;gap:8px;margin-bottom:18px;justify-content:center")}>
+                        <button onClick={V.setBinScan} style={css(`padding:9px 18px;border:1.5px solid #e5e7eb;border-radius:10px;background:${V.binScanModeBg};color:${V.binScanModeFg};font-size:14px;font-weight:600`)}>QR scannen</button>
+                        <button onClick={V.setBinList} style={css(`padding:9px 18px;border:1.5px solid #e5e7eb;border-radius:10px;background:${V.binListModeBg};color:${V.binListModeFg};font-size:14px;font-weight:600`)}>Alle Lagerplätze</button>
+                      </div>
+                      <div style={css("max-width:600px;margin:0 auto;background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:36px;box-shadow:0 1px 2px rgba(15,23,42,.04)")}>
+                        <div style={css("text-align:center")}>
+                          <div style={css(`width:58px;height:58px;border-radius:14px;background:#eff6ff;color:${accent};display:flex;align-items:center;justify-content:center;font-size:26px;margin:0 auto 14px`)}>⊡</div>
+                          <div style={css("font-size:19px;font-weight:700;color:#111827")}>Lagerplatz-QR scannen</div>
+                          <div style={css("font-size:14px;color:#6b7280;margin-top:5px")}>QR-Etikett am Regal scannen oder Lagerplatz-Code eingeben — Sie sehen sofort Standort und Inhalt.</div>
+                        </div>
+                        <div style={css("display:flex;gap:10px;margin-top:24px")}>
+                          <Hx tag="input" value={V.binQuery} onChange={V.onBinQuery} onKeyDown={V.onBinKey} innerRef={V.binScanRef} autoFocus placeholder="z. B. A-01-02" css="flex:1;padding:15px 18px;border:1.5px solid #e5e7eb;border-radius:12px;font-family:'IBM Plex Mono',monospace;font-size:16px;outline:none" focus={`border-color:${accent}`} />
+                          <button onClick={V.doBinScan} style={css(`padding:15px 26px;border:none;border-radius:12px;background:${accent};color:#fff;font-size:15px;font-weight:600;white-space:nowrap`)}>Öffnen</button>
+                        </div>
+                        {V.hasBinError && (
+                          <div style={css("margin:12px 0 0;padding:11px 16px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;color:#dc2626;font-size:13.5px;text-align:center")}>{V.binError}</div>
+                        )}
+                      </div>
+                    </React.Fragment>
+                  )}
+
+                  {V.binList && (
+                    <React.Fragment>
+                      <div style={css("display:flex;gap:8px;margin-bottom:18px;justify-content:center")}>
+                        <button onClick={V.setBinScan} style={css(`padding:9px 18px;border:1.5px solid #e5e7eb;border-radius:10px;background:${V.binScanModeBg};color:${V.binScanModeFg};font-size:14px;font-weight:600`)}>QR scannen</button>
+                        <button onClick={V.setBinList} style={css(`padding:9px 18px;border:1.5px solid #e5e7eb;border-radius:10px;background:${V.binListModeBg};color:${V.binListModeFg};font-size:14px;font-weight:600`)}>Alle Lagerplätze</button>
+                      </div>
+                      <div style={css("position:relative;margin-bottom:16px")}>
+                        <span style={css("position:absolute;left:14px;top:50%;transform:translateY(-50%);font-size:16px;color:#9ca3af")}>⌕</span>
+                        <Hx tag="input" value={V.binSearch} onChange={V.onBinSearch} placeholder="Lagerplatz, Bereich oder Teil suchen…" css="width:100%;padding:12px 16px 12px 40px;border:1.5px solid #e5e7eb;border-radius:12px;font-size:15px;background:#fff;outline:none" focus={`border-color:${accent}`} />
+                      </div>
+                      <div className="lp-grid-3" style={css("display:grid;grid-template-columns:repeat(3,1fr);gap:14px")}>
+                        {V.bins.map(b => (
+                          <Hx key={b.code} tag="button" onClick={b.open} css="display:flex;flex-direction:column;align-items:center;gap:10px;padding:18px 16px;border:1px solid #e5e7eb;border-radius:14px;background:#fff;text-align:center" hover={`border-color:${accent};box-shadow:0 6px 18px -12px rgba(15,23,42,.3)`}>
+                            <div style={css("padding:8px;border:1px solid #f0f1f3;border-radius:10px;background:#fff")}><img src={b.qr} width="92" height="92" alt="QR" style={css("display:block")} /></div>
+                            <div style={css("font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:700;color:#111827")}>{b.code}</div>
+                            <div style={css("font-size:11.5px;color:#9ca3af;line-height:1.3")}>{b.zone}</div>
+                            <div style={css("display:flex;align-items:center;gap:7px;margin-top:2px")}>
+                              <span style={css("font-size:12px;font-weight:600;color:#374151")}>{b.count} Teile</span>
+                              {b.hasCrit && <span style={css("font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:6px;background:#fef2f2;color:#dc2626")}>{b.crit} kritisch</span>}
+                            </div>
+                          </Hx>
+                        ))}
+                      </div>
+                      <div style={css("margin-top:12px;font-size:12.5px;color:#9ca3af;text-align:center")}>{V.binCount} Lagerplätze · QR-Etiketten zum Ausdrucken in der Detailansicht</div>
+                    </React.Fragment>
+                  )}
+
+                </div>
+                )}
+
+                {/* NACHBESTELLEN */}
+                {V.isBestellung && (
+                <div style={css("max-width:1000px;margin:0 auto;animation:lpfade .3s ease")}>
+
+                  {/* Tabs */}
+                  <div style={css("display:inline-flex;gap:4px;padding:4px;background:#eef0f3;border-radius:11px;margin-bottom:18px")}>
+                    <button onClick={V.setTabVorschlag} style={css(`padding:9px 18px;border:none;border-radius:8px;background:${V.tabVBg};color:${V.tabVFg};font-size:14px;font-weight:600;box-shadow:${V.tabVSh}`)}>Bestellvorschlag</button>
+                    <button onClick={V.setTabEmail} style={css(`padding:9px 18px;border:none;border-radius:8px;background:${V.tabEBg};color:${V.tabEFg};font-size:14px;font-weight:600;box-shadow:${V.tabESh}`)}>E-Mail-Anforderung</button>
+                    <button onClick={V.setTabGesendet} style={css(`padding:9px 18px;border:none;border-radius:8px;background:${V.tabGBg};color:${V.tabGFg};font-size:14px;font-weight:600;box-shadow:${V.tabGSh}`)}>Gesendet</button>
+                  </div>
+
+                  {/* TAB: Vorschlag */}
+                  {V.tabVorschlag && (
+                    <React.Fragment>
+                      <div style={css("display:flex;align-items:center;gap:16px;background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px 22px;margin-bottom:16px")}>
+                        <div style={css("flex:1")}>
+                          <div style={css("font-size:15px;font-weight:700;color:#111827")}>{V.reorderCount} Teile zum Nachbestellen</div>
+                          <div style={css("font-size:13px;color:#6b7280;margin-top:2px")}>Ausgewählt: {V.selPos} Positionen · {V.selMenge} Stück gesamt</div>
+                        </div>
+                        <button onClick={V.runSuggestion} style={css(`display:flex;align-items:center;gap:9px;padding:12px 20px;border:none;border-radius:11px;background:${accent};color:#fff;font-size:14.5px;font-weight:600;box-shadow:0 8px 20px -10px ${accent}`)}>
+                          {V.suggestBtnLabel}
+                        </button>
+                      </div>
+
+                      {V.hasAiReasons && (
+                        <div style={css("background:#f9fafb;border:1px solid #e5e7eb;border-radius:14px;padding:18px 22px;margin-bottom:16px")}>
+                          <div style={css("display:flex;align-items:center;gap:9px;margin-bottom:10px")}>
+                            <span style={css(`width:26px;height:26px;border-radius:7px;background:${accent};color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px`)}>✓</span>
+                            <span style={css("font-size:14.5px;font-weight:700;color:#111827")}>Bestellvorschlag berechnet</span>
+                          </div>
+                          <div style={css("font-size:13px;color:#6b7280;line-height:1.5")}>Mengen wurden regelbasiert auf Sollbestand (~2× Mindestbestand) optimiert, Normteile auf Gebinde gerundet. Begründungen stehen je Zeile in der Tabelle.</div>
+                        </div>
+                      )}
+
+                      {V.noReorder && (
+                        <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:48px;text-align:center")}>
+                          <div style={css("width:60px;height:60px;border-radius:50%;background:#f0fdf4;color:#15803d;display:flex;align-items:center;justify-content:center;font-size:30px;margin:0 auto 16px")}>✓</div>
+                          <div style={css("font-size:18px;font-weight:700;color:#111827")}>Keine Nachbestellung nötig</div>
+                          <div style={css("font-size:14px;color:#6b7280;margin-top:5px")}>Alle Teile liegen ausreichend über dem Mindestbestand.</div>
+                        </div>
+                      )}
+
+                      {V.hasReorder && (<React.Fragment>
+                        <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden")}>
+                          <div style={css("display:grid;grid-template-columns:32px 2fr 0.9fr 0.9fr 1.4fr;gap:12px;padding:12px 20px;background:#f9fafb;border-bottom:1px solid #f0f1f3;font-size:11.5px;font-weight:600;letter-spacing:.04em;color:#9ca3af;text-transform:uppercase")}>
+                            <div></div><div>Teil</div><div style={css("text-align:right")}>Bestand</div><div style={css("text-align:right")}>Verbr. ges.</div><div style={css("text-align:right")}>Bestellmenge</div>
+                          </div>
+                          {V.reorderList.map(p => (
+                            <div key={p.id} style={css(`display:grid;grid-template-columns:32px 2fr 0.9fr 0.9fr 1.4fr;gap:12px;align-items:center;padding:13px 20px;border-bottom:1px solid #f4f5f7;opacity:${p.rowOpacity}`)}>
+                              <button onClick={p.onToggle} style={css(`width:22px;height:22px;border:1.5px solid ${p.checkBorder};border-radius:6px;background:${p.checkBg};color:#fff;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;padding:0`)}>{p.checkMark}</button>
+                              <div style={css("min-width:0")}>
+                                <div style={css("font-size:14px;font-weight:600;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{p.bezeichnung}</div>
+                                <div style={css("font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#9ca3af")}>{p.nummer} · {p.lagerplatz} <span style={css(`color:${p.statusColor}`)}>· {p.statusLabel}</span></div>
+                                {p.aiGrund && <div style={css(`font-size:11.5px;color:${accent};margin-top:3px`)}>→ {p.aiGrund}</div>}
+                              </div>
+                              <div style={css("text-align:right;font-family:'IBM Plex Mono',monospace;font-size:13.5px;color:#1f2937")}>{p.bestand} <span style={css("font-size:11px;color:#cbd5e1")}>/{p.mindestbestand}</span></div>
+                              <div style={css("text-align:right;font-family:'IBM Plex Mono',monospace;font-size:13.5px;color:#6b7280")}>{p.verbrauch}</div>
+                              <div style={css("display:flex;align-items:center;justify-content:flex-end;gap:8px")}>
+                                <Hx tag="input" value={p.qty} onChange={p.onQty} type="number" inputMode="numeric" css="width:84px;height:40px;text-align:center;border:1.5px solid #e5e7eb;border-radius:9px;font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:600;outline:none" focus={`border-color:${accent}`} />
+                                <span style={css("font-size:12px;color:#9ca3af;width:24px")}>{p.einheit}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        <div style={css("display:flex;justify-content:flex-end;margin-top:16px")}>
+                          <button onClick={V.setTabEmail} style={css(`padding:13px 24px;border:none;border-radius:11px;background:${accent};color:#fff;font-size:15px;font-weight:600;box-shadow:0 8px 20px -10px ${accent}`)}>Weiter zur E-Mail-Anforderung →</button>
+                        </div>
+                      </React.Fragment>)}
+                    </React.Fragment>
+                  )}
+
+                  {/* TAB: E-Mail */}
+                  {V.tabEmail && (
+                    <div className="lp-grid-side" style={css("display:grid;grid-template-columns:300px 1fr;gap:18px;align-items:start")}>
+                      <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:20px")}>
+                        <div style={css("font-size:14px;font-weight:700;color:#111827;margin-bottom:14px")}>Empfänger</div>
+                        <div style={css("display:flex;flex-direction:column;gap:10px")}>
+                          {V.recipients.map(r => (
+                            <Hx key={r.id} tag="button" onClick={r.toggle} css="display:flex;align-items:center;gap:11px;padding:10px 12px;border:1.5px solid #eef0f3;border-radius:10px;background:#fff;text-align:left" hover="border-color:#d1d5db">
+                              <span style={css(`width:20px;height:20px;flex:none;border:1.5px solid ${r.checkBorder};border-radius:6px;background:${r.checkBg};color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center`)}>{r.checkMark}</span>
+                              <span style={css("min-width:0;flex:1")}><span style={css("display:block;font-size:13.5px;font-weight:600;color:#1f2937")}>{r.name}</span><span style={css("display:block;font-size:11.5px;color:#9ca3af;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{r.role} · {r.email}</span></span>
+                            </Hx>
+                          ))}
+                        </div>
+                        <div style={css("font-size:12px;font-weight:600;color:#6b7280;margin:16px 0 6px")}>Weitere E-Mail</div>
+                        <Hx tag="input" value={V.customEmail} onChange={V.onCustomEmail} placeholder="name@firma.de" css="width:100%;padding:10px 12px;border:1.5px solid #e5e7eb;border-radius:9px;font-size:13.5px;outline:none" focus={`border-color:${accent}`} />
+                        <div style={css("font-size:12px;font-weight:600;color:#6b7280;margin:16px 0 6px")}>Notiz (optional)</div>
+                        <Hx tag="textarea" value={V.emailNote} onChange={V.onEmailNote} placeholder="z. B. dringend für Auftrag 4711" rows="3" css="width:100%;padding:10px 12px;border:1.5px solid #e5e7eb;border-radius:9px;font-size:13.5px;font-family:inherit;resize:vertical;outline:none" focus={`border-color:${accent}`} />
+                      </div>
+
+                      <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden")}>
+                        <div style={css("padding:16px 22px;border-bottom:1px solid #f0f1f3;font-size:14px;font-weight:700;color:#111827")}>E-Mail-Vorschau</div>
+                        <div style={css("padding:18px 22px;border-bottom:1px solid #f4f5f7")}>
+                          <div style={css("display:flex;gap:10px;margin-bottom:8px")}><span style={css("font-size:12.5px;color:#9ca3af;width:46px;flex:none")}>An:</span><span style={css("font-size:13px;color:#374151")}>{V.emailToLabel}</span></div>
+                          <div style={css("display:flex;gap:10px")}><span style={css("font-size:12.5px;color:#9ca3af;width:46px;flex:none")}>Betreff:</span><span style={css("font-size:13px;font-weight:600;color:#1f2937")}>{V.emailSubjectText}</span></div>
+                        </div>
+                        <div style={css("padding:18px 22px")}>
+                          <div style={css("font-size:13.5px;color:#374151;margin-bottom:12px")}>Bitte folgende Teile nachbestellen:</div>
+                          <div style={css("display:flex;flex-direction:column;gap:7px")}>
+                            {V.emailLines.map(l => (
+                              <div key={l.key} style={css("display:flex;align-items:flex-start;gap:9px;font-size:13.5px;color:#1f2937")}><span style={css(`color:${accent}`)}>•</span><span>{l.text}</span></div>
+                            ))}
+                          </div>
+                          {V.emailNote && <div style={css("margin-top:14px;padding:11px 14px;background:#f9fafb;border-radius:9px;font-size:13px;color:#6b7280")}>Notiz: {V.emailNote}</div>}
+                        </div>
+                        <div style={css("display:flex;align-items:center;gap:12px;padding:16px 22px;border-top:1px solid #f0f1f3;background:#fafafa")}>
+                          <div style={css("flex:1;font-size:12.5px;color:#9ca3af")}>{V.selPos} Positionen · {V.selMenge} Stück</div>
+                          <button onClick={V.sendEmail} style={css(`display:flex;align-items:center;gap:9px;padding:13px 24px;border:none;border-radius:11px;background:${accent};color:#fff;font-size:15px;font-weight:600;box-shadow:0 8px 20px -10px ${accent}`)}><span style={css("font-size:15px")}>✉</span> Bestellanforderung senden</button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* TAB: Gesendet */}
+                  {V.tabGesendet && (
+                    <React.Fragment>
+                      {V.noSent && (
+                        <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:48px;text-align:center")}>
+                          <div style={css(`width:56px;height:56px;border-radius:14px;background:#eff6ff;color:${accent};display:flex;align-items:center;justify-content:center;font-size:26px;margin:0 auto 14px`)}>✉</div>
+                          <div style={css("font-size:17px;font-weight:700;color:#111827")}>Noch keine Bestellanforderungen</div>
+                          <div style={css("font-size:14px;color:#6b7280;margin-top:5px")}>Gesendete Anforderungen erscheinen hier mit Empfängern und Inhalt.</div>
+                        </div>
+                      )}
+                      {V.sentCount > 0 && (
+                        <div style={css("display:flex;flex-direction:column;gap:12px")}>
+                          {V.sentOrders.map(o => (
+                            <div key={o.id} style={css("background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:18px 22px")}>
+                              <div style={css("display:flex;align-items:center;gap:12px;margin-bottom:10px")}>
+                                <span style={css("width:30px;height:30px;border-radius:8px;flex:none;background:#f0fdf4;color:#15803d;display:flex;align-items:center;justify-content:center;font-size:15px")}>✓</span>
+                                <div style={css("flex:1")}><div style={css("font-size:14.5px;font-weight:700;color:#111827")}>{o.method}-Bestellanforderung · {o.count} Positionen</div><div style={css("font-size:12px;color:#9ca3af")}>{o.when} · von {o.user}</div></div>
+                                <span style={css("font-size:12px;font-weight:600;color:#15803d;background:#f0fdf4;padding:4px 10px;border-radius:7px")}>Ausgelöst</span>
+                              </div>
+                              <div style={css("font-size:12.5px;color:#6b7280;margin-bottom:6px")}>An: {o.toLabel}</div>
+                              <div style={css("font-size:13px;color:#374151;line-height:1.5")}>{o.partLabel}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </React.Fragment>
+                  )}
+
+                </div>
+                )}
+
+                {/* WARNUNGEN */}
+                {V.isWarnungen && (
+                <div style={css("max-width:980px;animation:lpfade .3s ease")}>
+                  {V.allGood && (
+                    <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:48px;text-align:center")}>
+                      <div style={css("width:60px;height:60px;border-radius:50%;background:#f0fdf4;color:#15803d;display:flex;align-items:center;justify-content:center;font-size:30px;margin:0 auto 16px")}>✓</div>
+                      <div style={css("font-size:18px;font-weight:700;color:#111827")}>Keine Warnungen</div>
+                      <div style={css("font-size:14px;color:#6b7280;margin-top:5px")}>Alle Teile liegen über dem Mindestbestand.</div>
+                    </div>
+                  )}
+
+                  {V.warnCriticalCount > 0 && (<React.Fragment>
+                    <div style={css("display:flex;align-items:center;gap:10px;margin-bottom:12px")}>
+                      <span style={css("width:10px;height:10px;border-radius:50%;background:#dc2626")}></span>
+                      <span style={css("font-size:16px;font-weight:700;color:#111827")}>Kritisch — sofort bestellen</span>
+                      <span style={css("font-size:13px;color:#9ca3af")}>({V.warnCriticalCount})</span>
+                    </div>
+                    <div className="lp-grid-2" style={css("display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:26px")}>
+                      {V.warnCritical.map(p => (
+                        <Hx key={p.id} tag="button" onClick={p.open} css="text-align:left;display:flex;align-items:center;gap:14px;padding:16px 18px;border:1px solid #fecaca;border-radius:13px;background:#fff;border-left:4px solid #dc2626" hover="background:#fffafa">
+                          <div style={css("flex:1;min-width:0")}><div style={css("font-size:15px;font-weight:600;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{p.bezeichnung}</div><div style={css("font-family:'IBM Plex Mono',monospace;font-size:12px;color:#9ca3af;margin-top:2px")}>{p.nummer} · {p.lagerplatz}</div></div>
+                          <div style={css("text-align:right;flex:none")}><div style={css("font-family:'IBM Plex Mono',monospace;font-size:18px;font-weight:700;color:#dc2626")}>{p.bestand}</div><div style={css("font-size:11px;color:#9ca3af")}>Min. {p.mindestbestand}</div></div>
+                        </Hx>
+                      ))}
+                    </div>
+                  </React.Fragment>)}
+
+                  {V.warnReorderCount > 0 && (<React.Fragment>
+                    <div style={css("display:flex;align-items:center;gap:10px;margin-bottom:12px")}>
+                      <span style={css("width:10px;height:10px;border-radius:50%;background:#d97706")}></span>
+                      <span style={css("font-size:16px;font-weight:700;color:#111827")}>Bald bestellen</span>
+                      <span style={css("font-size:13px;color:#9ca3af")}>({V.warnReorderCount})</span>
+                    </div>
+                    <div className="lp-grid-2" style={css("display:grid;grid-template-columns:1fr 1fr;gap:12px")}>
+                      {V.warnReorder.map(p => (
+                        <Hx key={p.id} tag="button" onClick={p.open} css="text-align:left;display:flex;align-items:center;gap:14px;padding:16px 18px;border:1px solid #fde68a;border-radius:13px;background:#fff;border-left:4px solid #d97706" hover="background:#fffdf7">
+                          <div style={css("flex:1;min-width:0")}><div style={css("font-size:15px;font-weight:600;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{p.bezeichnung}</div><div style={css("font-family:'IBM Plex Mono',monospace;font-size:12px;color:#9ca3af;margin-top:2px")}>{p.nummer} · {p.lagerplatz}</div></div>
+                          <div style={css("text-align:right;flex:none")}><div style={css("font-family:'IBM Plex Mono',monospace;font-size:18px;font-weight:700;color:#b45309")}>{p.bestand}</div><div style={css("font-size:11px;color:#9ca3af")}>Min. {p.mindestbestand}</div></div>
+                        </Hx>
+                      ))}
+                    </div>
+                  </React.Fragment>)}
+                </div>
+                )}
+
+                {/* HISTORIE */}
+                {V.isHistorie && (
+                <div style={css("max-width:980px;animation:lpfade .3s ease")}>
+                  <div style={css("display:flex;align-items:center;gap:16px;margin-bottom:16px")}>
+                    <div style={css("font-size:13.5px;color:#6b7280")}>{V.allTxCount} Buchungen gesamt · {V.todayCount} heute</div>
+                  </div>
+                  <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden")}>
+                    <div style={css("display:grid;grid-template-columns:0.5fr 2fr 1fr 1fr 0.8fr;gap:12px;padding:12px 22px;background:#f9fafb;border-bottom:1px solid #f0f1f3;font-size:11.5px;font-weight:600;letter-spacing:.04em;color:#9ca3af;text-transform:uppercase")}>
+                      <div></div><div>Teil</div><div>Mitarbeiter</div><div>Zeitpunkt</div><div style={css("text-align:right")}>Menge</div>
+                    </div>
+                    {V.allTx.map(t => (
+                      <div key={t.id} style={css("display:grid;grid-template-columns:0.5fr 2fr 1fr 1fr 0.8fr;gap:12px;align-items:center;padding:12px 22px;border-bottom:1px solid #f4f5f7")}>
+                        <div><div style={css(`width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;background:${t.tBg};color:${t.tColor}`)}>{t.sign}</div></div>
+                        <div style={css("min-width:0")}><div style={css("font-size:14px;font-weight:500;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{t.bezeichnung}</div><div style={css("font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#9ca3af")}>{t.nummer}</div></div>
+                        <div style={css("display:flex;align-items:center;gap:8px;min-width:0")}><div style={css("width:24px;height:24px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;background:#eef2f7;color:#475569")}>{t.uInit}</div><span style={css("font-size:13px;color:#374151;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{t.user}</span></div>
+                        <div style={css("font-size:13px;color:#6b7280")}>{t.whenFull}</div>
+                        <div style={css(`text-align:right;font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:600;color:${t.tColor}`)}>{t.deltaLabel}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                )}
+
+                {/* PERSONAL / BENUTZERVERWALTUNG */}
+                {V.isPersonal && (
+                <div style={css("max-width:920px;animation:lpfade .3s ease")}>
+
+                  {V.userEditing && (
+                    <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(15,23,42,.04);margin-bottom:18px")}>
+                      <div style={css("padding:20px 26px;border-bottom:1px solid #f0f1f3;font-size:17px;font-weight:700;color:#111827")}>{V.userEditTitle}</div>
+                      <div style={css("padding:26px;display:grid;grid-template-columns:1fr 1fr;gap:18px")}>
+                        <div style={css("grid-column:1 / -1")}>
+                          <div style={css("font-size:12.5px;font-weight:600;color:#6b7280;margin-bottom:6px")}>Name *</div>
+                          <Hx tag="input" value={V.userDraft.name||''} onChange={V.ufName} placeholder="z. B. Max Mustermann" css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:14.5px;outline:none" focus={`border-color:${accent}`} />
+                        </div>
+                        <div>
+                          <div style={css("font-size:12.5px;font-weight:600;color:#6b7280;margin-bottom:6px")}>Rolle / Abteilung</div>
+                          <Hx tag="select" value={V.userDraft.role||'Montage'} onChange={V.ufRole} css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:14.5px;background:#fff;outline:none" focus={`border-color:${accent}`}>
+                            {V.roleOptions.map(r => <option key={r} value={r}>{r}</option>)}
+                          </Hx>
+                        </div>
+                        <div>
+                          <div style={css("font-size:12.5px;font-weight:600;color:#6b7280;margin-bottom:6px")}>{V.userIsEdit ? 'Neues Passwort (optional)' : 'Passwort *'}</div>
+                          <Hx tag="input" value={V.userDraft.password||''} onChange={V.ufPass} type="password" placeholder={V.userIsEdit ? 'leer lassen = unverändert' : 'mind. 4 Zeichen'} css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:14.5px;outline:none" focus={`border-color:${accent}`} />
+                        </div>
+                        <label style={css("grid-column:1 / -1;display:flex;align-items:center;gap:10px;font-size:14px;color:#374151;cursor:pointer")}>
+                          <input type="checkbox" checked={!!V.userDraft.admin} onChange={V.ufAdmin} style={css("width:17px;height:17px;accent-color:"+accent)} />
+                          <span>Administrator — darf die Benutzerverwaltung („Personal") öffnen</span>
+                        </label>
+                      </div>
+                      {V.hasUserError && (
+                        <div style={css("margin:0 26px;padding:10px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;color:#dc2626;font-size:13px")}>{V.userError}</div>
+                      )}
+                      <div style={css("display:flex;gap:12px;justify-content:flex-end;padding:18px 26px;border-top:1px solid #f0f1f3;background:#fafafa;margin-top:18px")}>
+                        <button onClick={V.cancelUser} style={css("padding:11px 20px;border:1.5px solid #e5e7eb;border-radius:10px;background:#fff;font-size:14.5px;font-weight:600;color:#374151")}>Abbrechen</button>
+                        <button onClick={V.saveUser} style={css(`padding:11px 24px;border:none;border-radius:10px;background:${accent};color:#fff;font-size:14.5px;font-weight:600`)}>Speichern</button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={css("display:flex;align-items:center;gap:12px;margin-bottom:16px")}>
+                    <div style={css("flex:1")}>
+                      <div style={css("font-size:13.5px;color:#6b7280")}>{V.userCount} Mitarbeiter · Konten & Zugriff verwalten</div>
+                    </div>
+                    <button onClick={V.startUserCreate} style={css(`display:flex;align-items:center;gap:8px;padding:11px 18px;border:none;border-radius:11px;background:${accent};color:#fff;font-size:14.5px;font-weight:600;white-space:nowrap;box-shadow:0 6px 16px -9px ${accent}`)}><span style={css("font-size:17px")}>+</span> Neuer Mitarbeiter</button>
+                  </div>
+
+                  <div style={css("background:#fff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden")}>
+                    <div style={css("display:grid;grid-template-columns:2fr 1.2fr 1fr 1.1fr;gap:12px;padding:12px 22px;background:#f9fafb;border-bottom:1px solid #f0f1f3;font-size:11.5px;font-weight:600;letter-spacing:.04em;color:#9ca3af;text-transform:uppercase")}>
+                      <div>Mitarbeiter</div><div>Rolle</div><div>Zugriff</div><div style={css("text-align:right")}>Aktionen</div>
+                    </div>
+                    {V.personalUsers.map(u => (
+                      <div key={u.id} style={css("display:grid;grid-template-columns:2fr 1.2fr 1fr 1.1fr;gap:12px;align-items:center;padding:13px 22px;border-bottom:1px solid #f4f5f7")}>
+                        <div style={css("display:flex;align-items:center;gap:11px;min-width:0")}>
+                          <div style={css(`width:34px;height:34px;border-radius:50%;flex:none;background:${u.avatarBg};color:${u.avatarFg};display:flex;align-items:center;justify-content:center;font-weight:600;font-size:13px`)}>{u.initials}</div>
+                          <div style={css("min-width:0")}>
+                            <div style={css("font-size:14px;font-weight:600;color:#1f2937;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>{u.name} {u.isSelf && <span style={css("font-size:11px;font-weight:600;color:#9ca3af")}>(du)</span>}</div>
+                          </div>
+                        </div>
+                        <div style={css("font-size:13.5px;color:#374151")}>{u.role}</div>
+                        <div>
+                          {u.admin
+                            ? <span style={css("font-size:11.5px;font-weight:600;padding:4px 9px;border-radius:7px;background:#eef2ff;color:#4f46e5")}>Administrator</span>
+                            : <span style={css("font-size:11.5px;font-weight:600;padding:4px 9px;border-radius:7px;background:#f3f4f6;color:#6b7280")}>Standard</span>}
+                        </div>
+                        <div style={css("display:flex;gap:8px;justify-content:flex-end")}>
+                          <Hx tag="button" onClick={u.onEdit} title={"Bearbeiten: "+u.name} css="padding:7px 13px;border:1.5px solid #e5e7eb;border-radius:9px;background:#fff;font-size:13px;font-weight:600;color:#374151" hover={`border-color:${accent};color:${accent}`}>Bearbeiten</Hx>
+                          <Hx tag="button" onClick={u.onDelete} title={"Löschen: "+u.name} css="padding:7px 13px;border:1.5px solid #fecaca;border-radius:9px;background:#fff;font-size:13px;font-weight:600;color:#dc2626" hover="background:#fef2f2">Löschen</Hx>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={css("margin-top:10px;font-size:12px;color:#9ca3af")}>Hinweis: Demo-Daten werden lokal im Browser gespeichert (localStorage). Passwörter sind unverschlüsselt — im Produktivbetrieb übernimmt das ein sicherer Server.</div>
+                </div>
+                )}
+
+              </main>
+            </div>
+          </div>
+        )}
+
+        {V.pwModal && (
+          <div onClick={V.closePwModal} style={css("position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:60;animation:lpfade .2s ease")}>
+            <div onClick={(e)=>e.stopPropagation()} style={{...css("width:420px;max-width:92vw;background:#fff;border-radius:16px;padding:26px 28px"), boxShadow:'0 24px 60px -20px rgba(15,23,42,.4)'}}>
+              <div style={css("font-size:18px;font-weight:700;color:#111827")}>Passwort ändern</div>
+              <div style={css("font-size:13px;color:#6b7280;margin:4px 0 18px")}>Eigenes Konto · {V.currentName}</div>
+              <div style={css("display:flex;flex-direction:column;gap:14px")}>
+                <div>
+                  <div style={css("font-size:12.5px;font-weight:600;color:#6b7280;margin-bottom:6px")}>Aktuelles Passwort</div>
+                  <Hx tag="input" value={V.pwCur} onChange={V.onPwCur} type="password" placeholder="aktuelles Passwort" css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:14.5px;outline:none" focus={`border-color:${accent}`} />
+                </div>
+                <div>
+                  <div style={css("font-size:12.5px;font-weight:600;color:#6b7280;margin-bottom:6px")}>Neues Passwort</div>
+                  <Hx tag="input" value={V.pwNew} onChange={V.onPwNew} type="password" placeholder="mind. 4 Zeichen" css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:14.5px;outline:none" focus={`border-color:${accent}`} />
+                </div>
+                <div>
+                  <div style={css("font-size:12.5px;font-weight:600;color:#6b7280;margin-bottom:6px")}>Neues Passwort bestätigen</div>
+                  <Hx tag="input" value={V.pwNew2} onChange={V.onPwNew2} onKeyDown={(e)=>{ if(e.key==='Enter') V.submitPwChange(); }} type="password" placeholder="wiederholen" css="width:100%;padding:11px 13px;border:1.5px solid #e5e7eb;border-radius:10px;font-size:14.5px;outline:none" focus={`border-color:${accent}`} />
+                </div>
+              </div>
+              {V.hasPwError && (
+                <div style={css("margin-top:14px;padding:10px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;color:#dc2626;font-size:13px")}>{V.pwError}</div>
+              )}
+              <div style={css("display:flex;gap:12px;justify-content:flex-end;margin-top:22px")}>
+                <button onClick={V.closePwModal} style={css("padding:11px 20px;border:1.5px solid #e5e7eb;border-radius:10px;background:#fff;font-size:14.5px;font-weight:600;color:#374151")}>Abbrechen</button>
+                <button onClick={V.submitPwChange} style={css(`padding:11px 24px;border:none;border-radius:10px;background:${accent};color:#fff;font-size:14.5px;font-weight:600`)}>Speichern</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {V.toast && (
+          <div style={{...css("position:fixed;bottom:26px;left:50%;transform:translateX(-50%);background:#0f172a;color:#fff;padding:12px 20px;border-radius:11px;font-size:14px;font-weight:500;animation:lptoast 2.6s ease forwards;z-index:50"), boxShadow:'0 16px 40px -12px rgba(15,23,42,.5)'}}>{V.toast}</div>
+        )}
+
+      </div>
+    );
+  }
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <App companyName="Forming AG" accentColor="#2563eb" showAiTeaser={true} />
+);
+</script>
+</body>
+</html>
