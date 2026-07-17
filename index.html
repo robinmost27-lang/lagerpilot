@@ -457,8 +457,7 @@ class App extends React.Component {
     if (!this.cloudOn()) return;
     const body = this.partBody(p, opts&&opts.deleted);
     try {
-      const r = await fetch(this.state.n8nBase+'/lagerpilot/part', { method:'POST',
-        headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+      const r = await fetch(this.state.n8nBase+'/lagerpilot/part', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
       if (!r.ok) throw new Error('HTTP '+r.status);
     } catch(e) { this.enqueue({ kind:'part', body }); }
   };
@@ -468,8 +467,7 @@ class App extends React.Component {
     const body = { id:tx.id, ts:(tx.ts instanceof Date?tx.ts.toISOString():tx.ts), user:tx.user,
       typ:tx.type, nummer:tx.nummer, bezeichnung:tx.bezeichnung, menge:tx.menge, rest:tx.rest, partId:'' };
     try {
-      const r = await fetch(this.state.n8nBase+'/lagerpilot/booking', { method:'POST',
-        headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+      const r = await fetch(this.state.n8nBase+'/lagerpilot/booking', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
       if (!r.ok) throw new Error('HTTP '+r.status);
     } catch(e) { this.enqueue({ kind:'booking', body }); }
   };
@@ -483,8 +481,7 @@ class App extends React.Component {
     if (!this.cloudOn()) return;
     const body = this.userBody(u, opts&&opts.deleted);
     try {
-      const r = await fetch(this.state.n8nBase+'/lagerpilot/user', { method:'POST',
-        headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+      const r = await fetch(this.state.n8nBase+'/lagerpilot/user', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
       if (!r.ok) throw new Error('HTTP '+r.status);
     } catch(e) { this.enqueue({ kind:'user', body }); }
   };
@@ -528,8 +525,7 @@ class App extends React.Component {
     for (const item of queue) {
       const path = item.kind==='booking' ? '/lagerpilot/booking' : (item.kind==='user' ? '/lagerpilot/user' : '/lagerpilot/part');
       try {
-        const r = await fetch(this.state.n8nBase+path, { method:'POST',
-          headers:{'Content-Type':'application/json'}, body:JSON.stringify(item.body) });
+        const r = await fetch(this.state.n8nBase+path, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(item.body) });
         if (!r.ok) throw new Error('HTTP '+r.status);
       } catch(e) { keep.push(item); }
     }
@@ -548,6 +544,10 @@ class App extends React.Component {
     // Noch nicht gepushte lokale Teile/Buchungen behalten Vorrang (Benutzer: in pullUsers).
     const pendP = {}, pendB = {};
     this._pending.forEach(it => { if(it.body){ if(it.kind==='part') pendP[it.body.id]=1; else if(it.kind==='booking') pendB[it.body.id]=1; } });
+    // Neuer/leerer Cloud-Speicher → lokale Teile einmalig zum Hochladen einreihen.
+    if (cloudParts.length===0 && this.state.parts.length) {
+      this.state.parts.forEach(p => { if(!pendP[p.id]) this.enqueue({ kind:'part', body:this.partBody(p, false) }); });
+    }
     // Teile: lokal als Basis, Cloud überschreibt/ergänzt/entfernt (außer bei offenem Push).
     const byId = {}; this.state.parts.forEach(p => { byId[p.id] = { ...p }; });
     cloudParts.forEach(c => {
